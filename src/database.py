@@ -8,7 +8,7 @@ DB_PATH = "data/grader.db"
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10) as conn:
         cursor = conn.cursor()
 
         # Create teams table
@@ -45,7 +45,7 @@ def register_team_db(section: str, modality: str, members: list[dict]) -> str:
     members_json = json.dumps(members)
     created_at = datetime.utcnow().isoformat()
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO teams (team_token, section, modality, members, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -56,7 +56,7 @@ def register_team_db(section: str, modality: str, members: list[dict]) -> str:
     return team_token
 
 def save_submission_db(team_token: str, deliverable_id: str, repo_url: str, commit_hash: str, metrics_json: str, is_ci_passing: bool) -> int:
-    with sqlite3.connect(DB_PATH) as conn:
+    with sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10) as conn:
         cursor = conn.cursor()
 
         cursor.execute("SELECT id FROM teams WHERE team_token = ?", (team_token,))
