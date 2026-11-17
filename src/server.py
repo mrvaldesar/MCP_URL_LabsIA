@@ -5,27 +5,21 @@ from typing import Annotated, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 from starlette.applications import Starlette
 
+from src.admin import ROUTES
+from src.audit import AuditMiddleware, audit_log, logger
 from src.auth import TeamAuthMiddleware
 from src.database import Receipt, init_db, register_team_db, save_submission_db
+from src.models import Member, Section
 
-CARNET_PATTERN = r"^[0-9]{7}$"
-GITHUB_USER_PATTERN = r"^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$"
 DELIVERABLE_PATTERN = r"^D([1-9]|10)$"
 COMMIT_PATTERN = r"^[0-9a-f]{7,40}$"
 MAX_METRICS_BYTES = 64 * 1024
 TEAM_SIZES = {"individual": 1, "pareja": 2, "trio": 3}
 
 DeliverableId = Literal["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10"]
-
-
-class Member(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    github_user: Annotated[str, Field(max_length=39, pattern=GITHUB_USER_PATTERN)]
-    carnet: Annotated[str, Field(pattern=CARNET_PATTERN)]
 
 
 class GraderMCP(FastMCP):
@@ -35,18 +29,25 @@ class GraderMCP(FastMCP):
 
         @asynccontextmanager
         async def lifespan(app: Starlette):
-            init_db()
-            async with transport_lifespan(app):
-                yield
+            with audit_log():
+                try:
+                    init_db()
+                except Exception:
+                    logger.exception("No se pudo inicializar SQLite")
+                    raise
+                async with transport_lifespan(app):
+                    yield
 
         app.router.lifespan_context = lifespan
+        app.router.routes.extend(ROUTES)
         app.add_middleware(TeamAuthMiddleware, path=self.settings.streamable_http_path)
+        app.add_middleware(AuditMiddleware)
         return app
 
 
 def register_team(
     team_name: str,
-    section: Literal["01", "02"],
+    section: Section,
     modality: Literal["individual", "pareja", "trio"],
     members: Annotated[list[Member], Field(min_length=1, max_length=3)],
     ctx: Context,
@@ -65,9 +66,15 @@ def register_team(
     if len(members) != TEAM_SIZES[modality]:
         raise ValueError(f"La modalidad {modality} requiere {TEAM_SIZES[modality]} integrante(s).")
 
-    request.state.issued_team_token = register_team_db(
-        team_name, section, modality, [member.model_dump() for member in members]
-    )
+    try:
+        request.state.issued_team_token = register_team_db(
+            team_name, section, modality, [member.model_dump() for member in members]
+        )
+    except ValueError:
+        raise
+    except Exception:
+        logger.exception("Falló el registro del equipo")
+        raise ValueError("Error interno del servidor.") from None
     return "Equipo registrado."
 
 
@@ -107,7 +114,11 @@ def submit_lab_results(
     except (ValueError, RecursionError):
         raise ValueError("metrics_json debe ser un JSON válido.") from None
 
-    return save_submission_db(team_id, deliverable_id, label, commit_hash, metrics_json, is_ci_passing)
+    try:
+        return save_submission_db(team_id, deliverable_id, label, commit_hash, metrics_json, is_ci_passing)
+    except Exception:
+        logger.exception("Falló el almacenamiento del envío")
+        raise ValueError("Error interno del servidor.") from None
 
 
 def create_server() -> GraderMCP:

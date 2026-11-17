@@ -14,3 +14,14 @@ Servidor remoto en Python 3.10+ con FastMCP, transporte Streamable HTTP, Pydanti
 El registro y el descubrimiento MCP son públicos. El estudiante recoge `X-Team-Token` por HTTP y configura el cliente MCP para enviar `Authorization: Bearer <token>`. El middleware resuelve el equipo y pasa solo su ID al servidor MCP. El token queda fuera de los argumentos y del resultado MCP. Las rutas de descubrimiento OAuth devuelven 404. El agente no lee ni escribe archivos `.env` ni guarda el token en el repositorio.
 
 SQLite conserva `token_hash` y `salt` en `teams`; la verificación emplea `hmac.compare_digest`. Evita registrar o incluir el token en mensajes de error. La migración de bases antiguas conserva los IDs, envíos y vigencia de los tokens. Los equipos antiguos carecen de nombre de equipo y usuario GitHub, datos que la versión anterior no recopilaba.
+
+## Operación docente
+
+Las rutas HTTP de administración quedan fuera del listado de herramientas MCP. Configura un `ADMIN_TOKEN` independiente en el entorno del servidor y envíalo como `Authorization: Bearer <ADMIN_TOKEN>`. Un token de equipo recibe 403.
+
+- `POST /admin/teams/{id}/rotate-token` reemplaza la credencial del equipo y entrega la nueva en `X-Team-Token`.
+- `GET /admin/export?section=01` descarga un CSV de envíos de la sección `01` o `02`.
+- `POST /admin/roster` recibe `{"section":"01","members":[{"github_user":"alumna-uno","carnet":"1234524"}]}`. Reemplaza atómicamente el padrón de esa sección para consulta operativa. El registro MCP conserva sus propias validaciones.
+- `GET /health` comprueba SQLite. El registro MCP permite cinco solicitudes por IP en una ventana de 60 segundos. El sexto devuelve 429 con `Retry-After`.
+
+El arranque aplica las migraciones numeradas de `migrations/` y guarda su historial en `schema_migrations`. Escribe eventos JSON en `grader.log` o en `GRADER_LOG_PATH` si está configurado. Mantén las credenciales fuera de los logs.

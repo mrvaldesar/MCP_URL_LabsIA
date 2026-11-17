@@ -1,14 +1,17 @@
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import sqlite3
+import time
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
 
 DB_PATH = "data/grader.db"
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
 class Receipt(TypedDict):
@@ -45,39 +48,7 @@ def init_db():
             conn.execute("ALTER TABLE submissions RENAME TO legacy_submissions")
             conn.execute("ALTER TABLE teams RENAME TO legacy_teams")
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS teams (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                team_name TEXT COLLATE NOCASE UNIQUE,
-                token_hash TEXT NOT NULL,
-                salt TEXT NOT NULL UNIQUE,
-                section TEXT NOT NULL,
-                modality TEXT NOT NULL,
-                members TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS member_identities (
-                github_user TEXT COLLATE NOCASE UNIQUE,
-                carnet TEXT NOT NULL UNIQUE
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS submissions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                team_id INTEGER NOT NULL REFERENCES teams (id),
-                deliverable_id TEXT NOT NULL,
-                label TEXT,
-                repo_url TEXT,
-                commit_hash TEXT NOT NULL,
-                declared_metrics_json TEXT NOT NULL,
-                declared_is_ci_passing BOOLEAN NOT NULL,
-                received_at_utc TEXT NOT NULL,
-                attempt INTEGER NOT NULL,
-                UNIQUE (team_id, deliverable_id, attempt)
-            )
-        """)
+        _apply_migrations(conn)
         if legacy:
             _migrate_legacy_rows(conn)
     # Remove WAL frames that could still contain legacy tokens.
@@ -85,6 +56,25 @@ def init_db():
         busy, _, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         if busy:
             raise RuntimeError("No se pudo truncar el WAL de SQLite. Cierra las otras conexiones y vuelve a iniciar.")
+
+
+def _apply_migrations(conn: sqlite3.Connection):
+    conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)")
+    migrations = sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql"))
+    if not migrations:
+        raise RuntimeError("No se encontraron las migraciones de SQLite.")
+    for path in migrations:
+        if conn.execute("SELECT 1 FROM schema_migrations WHERE name = ?", (path.name,)).fetchone():
+            continue
+        statement = ""
+        for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+            statement += line
+            if sqlite3.complete_statement(statement):
+                conn.execute(statement)
+                statement = ""
+        if statement.strip():
+            raise RuntimeError(f"Migración SQL incompleta: {path.name}")
+        conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", (path.name,))
 
 
 def _migrate_legacy_rows(conn: sqlite3.Connection):
@@ -115,16 +105,21 @@ def _migrate_legacy_rows(conn: sqlite3.Connection):
     conn.execute("DROP TABLE legacy_teams")
 
 
-def register_team_db(team_name: str, section: str, modality: str, members: list[dict]) -> str:
+def _new_token() -> tuple[str, str, str]:
     salt = secrets.token_hex(16)
     token = f"{salt}.{secrets.token_hex(32)}"
+    return token, salt, _token_hash(token, salt)
+
+
+def register_team_db(team_name: str, section: str, modality: str, members: list[dict]) -> str:
+    token, salt, token_hash = _new_token()
     with _connect() as conn:
         try:
             conn.execute("""
                 INSERT INTO teams (team_name, token_hash, salt, section, modality, members, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
-                team_name, _token_hash(token, salt), salt, section, modality,
+                team_name, token_hash, salt, section, modality,
                 json.dumps(members), datetime.now(timezone.utc).isoformat(),
             ))
         except sqlite3.IntegrityError as exc:
@@ -194,3 +189,39 @@ def save_submission_db(
             attempt=attempt,
             section=section,
         )
+
+
+def rotate_team_token(team_id: int) -> str | None:
+    token, salt, token_hash = _new_token()
+    with _connect() as conn:
+        updated = conn.execute("""
+            UPDATE teams SET token_hash = ?, salt = ? WHERE id = ?
+        """, (token_hash, salt, team_id))
+        return token if updated.rowcount == 1 else None
+
+
+def replace_roster(section: str, members: list[tuple[str, str]]):
+    with _connect() as conn:
+        conn.execute("DELETE FROM roster WHERE section = ?", (section,))
+        conn.executemany("""
+            INSERT INTO roster (section, github_user, carnet) VALUES (?, ?, ?)
+        """, ((section, github_user, carnet) for github_user, carnet in members))
+
+
+def check_health():
+    with _connect() as conn:
+        conn.execute("SELECT name FROM schema_migrations LIMIT 1").fetchone()
+
+
+def registration_retry_after(ip: str) -> int | None:
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        now = time.time()
+        conn.execute("DELETE FROM registration_requests WHERE requested_at <= ?", (now - 60,))
+        count, oldest = conn.execute("""
+            SELECT COUNT(*), MIN(requested_at) FROM registration_requests WHERE ip = ?
+        """, (ip,)).fetchone()
+        if count >= 5:
+            return max(1, math.ceil(oldest + 60 - now))
+        conn.execute("INSERT INTO registration_requests VALUES (?, ?)", (ip, now))
+    return None

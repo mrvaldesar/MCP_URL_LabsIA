@@ -51,3 +51,28 @@ curl -i http://localhost:8000/mcp \
   -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"register_team","arguments":{"team_name":"Equipo Uno","section":"01","modality":"individual","members":[{"github_user":"alumna-uno","carnet":"1234524"}]}}}'
 ```
+
+## Operación docente
+
+Configura `ADMIN_TOKEN` en el entorno del servidor con una credencial independiente de los tokens de equipo. En Docker, añade `-e ADMIN_TOKEN` al comando de arranque para pasar la variable desde el entorno del operador. Las rutas administrativas reciben `Authorization: Bearer <ADMIN_TOKEN>`.
+
+| Ruta | Operación |
+| --- | --- |
+| `GET /health` | Comprueba SQLite. Disponible sin token. |
+| `POST /admin/teams/{id}/rotate-token` | Invalida la credencial anterior y entrega la nueva en `X-Team-Token`. El ID del equipo aparece en el CSV. |
+| `GET /admin/export?section=01` | Descarga los envíos de la sección indicada como CSV. |
+| `POST /admin/roster` | Reemplaza el padrón de una sección con un JSON que contiene `section` y `members`. |
+
+Ejemplo de cuerpo para el padrón:
+
+```json
+{"section":"01","members":[{"github_user":"alumna-uno","carnet":"1234524"}]}
+```
+
+El servidor limita el registro a cinco solicitudes por IP en 60 segundos. Aplica las migraciones al arrancar y escribe logs JSON en `grader.log`. Configura `GRADER_LOG_PATH` para cambiar la ruta, por ejemplo a `/app/data/grader.log` para usar el volumen persistente de Docker.
+
+Para exportar desde una copia local de la base, ejecuta desde la raíz del repositorio:
+
+```bash
+python -m tools.export_section 01 --db data/grader.db > seccion-01.csv
+```

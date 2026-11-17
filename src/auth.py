@@ -6,7 +6,7 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from src.database import resolve_team_id
+from src.database import registration_retry_after, resolve_team_id
 
 TOKEN_PATTERN = re.compile(r"(?:[0-9a-f]{32}\.[0-9a-f]{64}|[0-9a-f]{32})")
 PUBLIC_METHODS = ("initialize", "notifications/initialized", "tools/list", "ping")
@@ -49,6 +49,19 @@ class TeamAuthMiddleware:
             and isinstance(params, dict)
             and params.get("name") == "register_team"
         )
+
+        if registration:
+            client = scope.get("client")
+            ip = client[0] if client else "unknown"
+            retry_after = await run_in_threadpool(registration_retry_after, ip)
+            if retry_after is not None:
+                response = JSONResponse(
+                    {"error": "Límite de registros alcanzado. Vuelve a intentarlo más tarde."},
+                    status_code=429,
+                    headers={"Retry-After": str(retry_after)},
+                )
+                await response(scope, receive, send)
+                return
 
         state = scope.setdefault("state", {})
         if method not in PUBLIC_METHODS and not registration:
