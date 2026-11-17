@@ -1,34 +1,16 @@
-# Contexto del Proyecto: Landívar MCP Grader
+# Landívar MCP Grader
 
-## Propósito
-Servidor MCP (Model Context Protocol) remoto en Python. Expone herramientas a los agentes de IA de los estudiantes (Cursor, Claude Desktop, etc.) para que registren sus equipos y envíen automáticamente los resultados de sus entregables de laboratorio (URL, commits, métricas) hacia una base de datos centralizada del docente.
+Servidor remoto en Python 3.10+ con FastMCP, transporte SSE, Pydantic y SQLite en `data/grader.db`. Arranca con `python -m src.server` y expone `/sse` y `/messages/`.
 
-## Stack Tecnológico
-- **Lenguaje:** Python 3.10+
-- **SDK MCP:** `mcp` (oficial de Anthropic, usando `FastMCP`)
-- **Transporte:** SSE (Server-Sent Events) a través de Starlette/FastAPI.
-- **Base de Datos:** SQLite (`data/grader.db`).
-- **Validación:** `pydantic`.
+## Contrato MCP
 
-## Base de Datos
-Debe contemplar dos tablas relacionales:
-1. `teams`: id, team_token (único), section (01 o 02), modality (individual, pareja, trio), members (JSON), created_at.
-2. `submissions`: id, team_id (FK), deliverable_id (ej. D1, D2), repo_url, commit_hash, metrics_json, is_ci_passing, timestamp.
+- `register_team(team_name, section, modality, members: list[Member]) -> str` retorna el token del equipo una sola vez. `Member` tiene los campos `github_user` y `carnet` como cadenas. Las secciones son `01` y `02`. Las modalidades `individual`, `pareja` y `trio` requieren uno, dos y tres integrantes, respectivamente.
+- El carné tiene siete dígitos ASCII. El usuario GitHub tiene hasta 39 caracteres ASCII alfanuméricos y admite guiones simples entre ellos. El nombre del equipo, los usuarios GitHub y los carnés son únicos globalmente. Los nombres y usuarios se comparan sin distinguir mayúsculas ASCII de minúsculas.
+- `submit_lab_results(deliverable_id, label, commit_hash, metrics_json, is_ci_passing) -> Receipt` recibe un entregable de `D1` a `D10`, una etiqueta no vacía, un hash de 7 a 40 dígitos hexadecimales en minúscula y una cadena JSON válida de hasta 64 KiB en UTF-8. Las métricas y el estado de CI son datos declarados por el equipo.
+- El recibo contiene `receipt_id`, `deliverable_id`, `label`, `received_at_utc`, `status`, `attempt` y `section`. El estado inicial es `received` y el contador empieza en uno por equipo y entregable. Los errores de validación o autenticación se devuelven como errores de herramienta MCP.
 
-## Herramientas (Tools) a Exponer
-El servidor debe exponer estas dos herramientas mediante el decorador `@mcp.tool()`:
+## Política del token
 
-1. `register_team(section: str, modality: str, members: list[dict]) -> str`
-   - Genera un `team_token` seguro (ej. `secrets.token_hex(16)`).
-   - Guarda el equipo en la tabla `teams`.
-   - Retorna un mensaje indicando éxito y entregando el `team_token` para que el agente del estudiante lo guarde en su `.env`.
+El estudiante configura el cliente MCP para enviar `Authorization: Bearer <token>` en las peticiones HTTP. El token queda fuera de los argumentos de las herramientas. El agente no lee ni escribe archivos `.env` ni guarda el token en el repositorio.
 
-2. `submit_lab_results(team_token: str, deliverable_id: str, repo_url: str, commit_hash: str, metrics_json: str, is_ci_passing: bool) -> str`
-   - Valida que el `team_token` exista en la tabla `teams`.
-   - Si no existe, retorna un error claro.
-   - Si existe, inserta el registro en `submissions` referenciando al equipo.
-   - Retorna un ID o mensaje de confirmación exitosa.
-
-## Reglas de Arquitectura para el Agente (Jules)
-1. **Transporte SSE:** Inicializa FastMCP configurando host y puerto para exponer endpoints web (SSE y POST para mensajes). NO uses `stdio`.
-2. **Resiliencia:** Si faltan datos o el token es inválido, devuelve strings de error descriptivos (no rompas el servidor con excepciones no manejadas) para que el agente del estudiante sepa cómo corregirlo.
+SQLite conserva `token_hash` y `salt` en `teams`; la verificación emplea `hmac.compare_digest`. Evita registrar o incluir el token en mensajes de error. La migración de bases antiguas conserva los IDs, envíos y vigencia de los tokens. Los equipos antiguos carecen de nombre de equipo y usuario GitHub, datos que la versión anterior no recopilaba.

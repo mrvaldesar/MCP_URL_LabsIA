@@ -6,58 +6,39 @@ Este servidor expone herramientas (Tools) a través de Server-Sent Events (SSE) 
 
 ## 🚀 Características Principales
 - **Registro Agentic:** Los agentes de IA pueden registrar a los estudiantes y obtener un `team_token` de forma autónoma.
-- **Validación Estricta:** Uso de Pydantic para asegurar que todos los envíos cumplan con la estructura de calificación requerida (URLs válidas, JSON parseable, secciones correctas).
+- **Validación Estricta:** Uso de Pydantic para asegurar que todos los envíos cumplan con la estructura de calificación requerida (identificadores de entregable, hashes de commit y JSON válido).
 - **Transporte Remoto (SSE):** Arquitectura lista para la nube, permitiendo conexiones desde cualquier cliente MCP compatible.
 - **Persistencia Segura:** Base de datos relacional en SQLite con manejo de concurrencia web.
-- **Auditoría y Trazabilidad:** Sistema de *logging* integrado que registra todas las interacciones, envíos exitosos y errores de validación.
+- **Trazabilidad:** Cada envío aceptado genera un recibo con la fecha UTC y el número de intento.
 
 ---
 
 ## 🛠️ Despliegue e Instalación
 
-### Opción A: Usando Docker (Recomendado para Producción)
-1. Construye la imagen de Docker:
-   ```bash
-   docker build -t landivar-mcp-grader .
-Ejecuta el contenedor (montando el volumen de datos para persistencia):
+### Opción A. Docker
 
-Bash
-docker run -d -p 8000:8000 -v $(pwd)/data:/app/data --name mcp_grader landivar-mcp-grader
-Opción B: Entorno Local (Desarrollo)
-Crea un entorno virtual y actívalo:
+```bash
+docker build -t landivar-mcp-grader .
+docker run -d -p 8000:8000 -v "$(pwd)/data:/app/data" --name mcp_grader landivar-mcp-grader
+```
 
-Bash
+### Opción B. Entorno local
+
+```bash
 python -m venv .venv
 source .venv/bin/activate  # En Windows: .venv\Scripts\activate
-Instala las dependencias:
-
-Bash
-pip install -r requirements.txt
-Ejecuta el servidor:
-
-Bash
+python -m pip install -r requirements.txt
 python -m src.server
-El servidor estará escuchando en http://localhost:8000 (o el dominio configurado). El archivo de base de datos se creará automáticamente en data/grader.db y los registros en grader.log.
+```
 
-🤖 Uso para los Estudiantes
-Los estudiantes deben configurar su cliente MCP (ej. claude_desktop_config.json o la configuración de Cursor) para apuntar a la URL de este servidor utilizando el transporte SSE.
+El servidor estará escuchando en http://localhost:8000 (o el dominio configurado). El archivo de base de datos se creará automáticamente en `data/grader.db`.
 
-Herramientas Disponibles (Tools):
-register_team
+## 🤖 Uso para los estudiantes
 
-Descripción: Registra un nuevo equipo en el sistema.
+Configura el cliente MCP para conectarse a `/sse` mediante SSE.
 
-Parámetros: section ("01" o "02"), modality ("individual", "pareja", "trio"), members (lista de diccionarios con carnet y nombre).
+1. Llama a `register_team(team_name, section, modality, members)`. Usa la sección `01` o `02` y proporciona uno, dos o tres integrantes según la modalidad `individual`, `pareja` o `trio`. Cada integrante requiere `github_user` y un `carnet` de siete dígitos.
+2. La herramienta devuelve el token una sola vez. Configura el cliente MCP para enviarlo en el encabezado HTTP `Authorization: Bearer <token>`. El agente no lee ni escribe archivos `.env`.
+3. Llama a `submit_lab_results(deliverable_id, label, commit_hash, metrics_json, is_ci_passing)`. El identificador va de `D1` a `D10`, el commit usa entre 7 y 40 dígitos hexadecimales en minúscula y las métricas se envían como una cadena JSON válida de hasta 64 KiB en UTF-8.
 
-Retorno: Un team_token único que el agente debe guardar en las variables de entorno del estudiante.
-
-submit_lab_results
-
-Descripción: Envía los resultados de un entregable (D1 a D10).
-
-Parámetros: team_token, deliverable_id (ej. "D5"), repo_url, commit_hash, metrics_json, is_ci_passing.
-
-Retorno: Mensaje de confirmación y ID de recibo.
-
-📋 Logs y Auditoría
-Cualquier fallo de validación (por ejemplo, si un agente envía un token inválido o un formato incorrecto) o errores internos del servidor se registrarán automáticamente en el archivo grader.log en la raíz del proyecto para fines de auditoría.
+El recibo incluye `receipt_id`, `deliverable_id`, `label`, `received_at_utc`, `status`, `attempt` y `section`. Las métricas y el estado de CI son declaraciones del equipo. El estado `received` confirma la recepción.

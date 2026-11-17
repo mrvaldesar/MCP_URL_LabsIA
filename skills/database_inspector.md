@@ -5,6 +5,6 @@
 **Instrucciones para Jules:**
 Cuando te pida "Revisa quiénes han enviado sus resultados" o "Verifica la base de datos", no asumas ni inventes datos. Debes ejecutar el siguiente comando en la terminal para extraer el estado real de la base de datos local:
 
-`sqlite3 data/grader.db "SELECT * FROM submissions ORDER BY timestamp DESC LIMIT 10;"`
+`sqlite3 data/grader.db "SELECT * FROM submissions ORDER BY received_at_utc DESC LIMIT 10;"`
 
 Si la tabla tiene un esquema diferente, primero ejecuta `.schema` para entender la estructura y luego haz la consulta. Muestra los resultados en formato de tabla Markdown.
