@@ -31,11 +31,11 @@ def rpc(client, method, params=None, token=None):
     })
 
 
-def register(client, team_name, members, modality="individual"):
+def register(client, team_name, members, modality="individual", section="02"):
     return rpc(client, "tools/call", {
         "name": "register_team",
         "arguments": {
-            "team_name": team_name, "section": "02", "modality": modality,
+            "team_name": team_name, "section": section, "modality": modality,
             "members": members,
         },
     })
@@ -195,3 +195,103 @@ def test_unexpected_admin_error_is_generic_and_log_redacts_secrets(client, grade
     log = grader_db.with_name("grader.log").read_text()
     assert "database failure" in log and "[REDACTED]" in log
     assert token not in log and "extra-secret" not in log
+
+
+@pytest.mark.parametrize(("modality", "members_count"), [
+    ("individual", 1), ("pareja", 2), ("trio", 3),
+])
+def test_register_accepts_each_modality_and_unicode_team_name(client, grader_db, modality, members_count):
+    members = [
+        {"github_user": f"alumna-{index}", "carnet": str(1234520 + index)}
+        for index in range(members_count)
+    ]
+    response = register(client, "Peña de Óscar", members, modality)
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    assert response.headers["X-Team-Token"]
+    with closing(sqlite3.connect(grader_db)) as conn:
+        team_name, stored_modality, stored_members = conn.execute(
+            "SELECT team_name, modality, members FROM teams"
+        ).fetchone()
+    assert (team_name, stored_modality, json.loads(stored_members)) == (
+        "Peña de Óscar", modality, members,
+    )
+
+
+@pytest.mark.parametrize(("modality", "members"), [
+    pytest.param("trio", [
+        {"github_user": f"alumna-{index}", "carnet": str(1234520 + index)}
+        for index in range(4)
+    ], id="cuarto-integrante"),
+    pytest.param("pareja", [MEMBER], id="pareja-incompleta"),
+    pytest.param("individual", [MEMBER | {"carnet": "1234A24"}], id="carne-invalido"),
+    pytest.param("individual", [MEMBER | {"github_user": "-alumna"}], id="guion-inicial"),
+    pytest.param("individual", [MEMBER | {"github_user": "Peña-Ávila"}], id="github-con-tildes-y-enie"),
+])
+def test_invalid_registration_creates_no_team(client, grader_db, modality, members):
+    response = register(client, "Equipo", members, modality)
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is True
+    assert "X-Team-Token" not in response.headers
+    with closing(sqlite3.connect(grader_db)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM teams").fetchone() == (0,)
+
+
+def submit(client, token, **overrides):
+    arguments = {
+        "deliverable_id": "D1", "label": "Revisión de diseño", "commit_hash": "abc1234",
+        "metrics_json": "{}", "is_ci_passing": True,
+    }
+    return rpc(client, "tools/call", {
+        "name": "submit_lab_results", "arguments": arguments | overrides,
+    }, token=token)
+
+
+@pytest.mark.parametrize("overrides", [
+    pytest.param({"deliverable_id": "D11"}, id="D11"),
+    pytest.param({"commit_hash": "ghijklm"}, id="commit-no-hex"),
+    pytest.param({"metrics_json": json.dumps("x" * 65_536)}, id="metricas-ASCII-grandes"),
+    pytest.param({"metrics_json": json.dumps("ñ" * 32_768, ensure_ascii=False)}, id="metricas-UTF8-grandes"),
+    pytest.param({"metrics_json": '{"faltante":'}, id="JSON-invalido"),
+])
+def test_invalid_submission_writes_no_receipt(client, grader_db, overrides):
+    token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    response = submit(client, token, **overrides)
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is True
+    with closing(sqlite3.connect(grader_db)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM submissions").fetchone() == (0,)
+
+
+def test_other_team_token_cannot_write_under_first_team(client, grader_db):
+    first_token = register(client, "Equipo A", [MEMBER], section="01").headers["X-Team-Token"]
+    second_token = register(client, "Equipo B", [
+        {"github_user": "alumna-dos", "carnet": "1234624"},
+    ], section="02").headers["X-Team-Token"]
+
+    first = submit(client, first_token).json()["result"]["structuredContent"]
+    assert first["section"] == "01" and first["attempt"] == 1
+    spoofed = submit(client, second_token, team_id=1, section="01")
+    assert spoofed.status_code == 200
+    result = spoofed.json()["result"]
+    if not result["isError"]:
+        assert result["structuredContent"]["section"] == "02"
+        assert result["structuredContent"]["attempt"] == 1
+
+    second = submit(client, second_token).json()["result"]["structuredContent"]
+    assert second["section"] == "02" and second["label"] == "Revisión de diseño"
+    assert second["attempt"] == (1 if result["isError"] else 2)
+    with closing(sqlite3.connect(grader_db)) as conn:
+        assert conn.execute("SELECT team_id, attempt FROM submissions WHERE team_id = 1").fetchall() == [(1, 1)]
+
+
+def test_section_export_cli(client, grader_db, monkeypatch, capsys):
+    from tools.export_section import main
+
+    token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    assert submit(client, token).json()["result"]["isError"] is False
+    monkeypatch.setattr("sys.argv", ["export_section", "02", "--db", str(grader_db)])
+    main()
+    assert [row["label"] for row in csv.DictReader(io.StringIO(capsys.readouterr().out))] == [
+        "Revisión de diseño",
+    ]

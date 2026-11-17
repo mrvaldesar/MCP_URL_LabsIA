@@ -27,3 +27,6 @@ data/
 
 # Logs
 *.log
+# Cobertura de pruebas
+.coverage
+.coverage.*

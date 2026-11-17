@@ -1,0 +1,7 @@
+[run]
+source =
+    src
+    tools
+
+[report]
+show_missing = True
