@@ -142,25 +142,26 @@ def register_team_db(team_name: str, section: str, modality: str, members: list[
     return token
 
 
-def _authenticate_team(conn: sqlite3.Connection, token: str) -> tuple[int, str]:
-    salt, separator, _ = token.partition(".")
-    if separator:
-        candidates = conn.execute("""
-            SELECT id, section, token_hash, salt FROM teams WHERE salt = ?
-        """, (salt,))
-    else:
-        # Previous releases issued tokens without a public lookup prefix.
-        candidates = conn.execute("""
-            SELECT id, section, token_hash, salt FROM teams WHERE team_name IS NULL
-        """)
-    for team_id, section, token_hash, salt in candidates:
-        if hmac.compare_digest(token_hash, _token_hash(token, salt)):
-            return team_id, section
-    raise ValueError("Token de equipo inválido.")
+def resolve_team_id(token: str) -> int | None:
+    with _connect() as conn:
+        salt, separator, _ = token.partition(".")
+        if separator:
+            candidates = conn.execute("""
+                SELECT id, token_hash, salt FROM teams WHERE salt = ?
+            """, (salt,))
+        else:
+            # Previous releases issued tokens without a public lookup prefix.
+            candidates = conn.execute("""
+                SELECT id, token_hash, salt FROM teams WHERE team_name IS NULL
+            """)
+        for team_id, token_hash, salt in candidates:
+            if hmac.compare_digest(token_hash, _token_hash(token, salt)):
+                return team_id
+        return None
 
 
 def save_submission_db(
-    token: str,
+    team_id: int,
     deliverable_id: str,
     label: str,
     commit_hash: str,
@@ -169,7 +170,10 @@ def save_submission_db(
 ) -> Receipt:
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        team_id, section = _authenticate_team(conn, token)
+        team = conn.execute("SELECT section FROM teams WHERE id = ?", (team_id,)).fetchone()
+        if team is None:
+            raise ValueError("El equipo autenticado ya no existe.")
+        section = team[0]
         attempt = conn.execute("""
             SELECT COALESCE(MAX(attempt), 0) + 1 FROM submissions
             WHERE team_id = ? AND deliverable_id = ?
