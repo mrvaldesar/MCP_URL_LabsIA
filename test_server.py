@@ -1242,3 +1242,36 @@ def test_happy_delivery_matrix_and_csv(client, github_api, monkeypatch, section,
         (section, "D1", "tardío", "60", "verificado", "exitoso", "0"),
         (section, "D2", "sin_plazo", "0", "verificado", "exitoso", "0"),
     ]
+
+
+def test_manual_and_automatic_retries_cannot_claim_same_receipt(client, grader_db, monkeypatch):
+    from src import verification
+
+    token = register(client, "Equipo pendiente", [MEMBER]).headers["X-Team-Token"]
+    assert submit(client, token, deliverable_id="D7", label="D7").json()["result"]["structuredContent"][
+        "verification_status"
+    ] == "pendiente"
+
+    async def check():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def github_unavailable(*args):
+            started.set()
+            await release.wait()
+            raise github.GitHubUnavailable()
+
+        monkeypatch.setattr(github, "verify_submission", github_unavailable)
+        automatic = asyncio.create_task(verification.retry(1, None, "reintento_automático"))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        try:
+            assert await verification.retry(1, "02", "docente-02") == ("en_curso", None)
+        finally:
+            release.set()
+        state, receipt = await asyncio.wait_for(automatic, timeout=5)
+        assert state == "pendiente"
+        assert receipt["verification_retry_count"] == 1
+
+    asyncio.run(check())
+    log = grader_db.with_name("grader.log").read_text()
+    assert "Reintento de verificación iniciado actor=reintento_automático recibo=1 reintento=1" in log

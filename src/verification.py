@@ -22,6 +22,7 @@ async def retry(receipt_id: int, section: str | None, actor: str):
     if claimed is None:
         return outcome, None
     repository, label, sha, count = claimed
+    logger.info("Reintento de verificación iniciado actor=%s recibo=%d reintento=%d", actor, receipt_id, count)
     ci = "desconocido"
     try:
         verified_sha = await github.verify_submission(repository, label, sha)
