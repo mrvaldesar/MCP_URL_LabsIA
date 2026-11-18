@@ -10,6 +10,8 @@ from starlette.testclient import TestClient
 from src import database
 from src.server import create_server
 
+INTERFACE_VERSION = 2
+
 
 def main():
     old_db = database.DB_PATH
@@ -25,7 +27,7 @@ def main():
                 payload = response.json()
                 if "tools" not in payload.get("result", {}):
                     raise RuntimeError("tools/list no devolvió una lista de herramientas.")
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
+                print(json.dumps({"interface_version": INTERFACE_VERSION, **payload}, ensure_ascii=False, indent=2))
         finally:
             database.DB_PATH = old_db
             if old_log is None:

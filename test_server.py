@@ -952,7 +952,8 @@ def test_reference_matches_live_tools_list(client, capsys):
 
     reference = Path(__file__).with_name("docs") / "tools-list.json"
     expected = json.loads(reference.read_text())
-    assert rpc(client, "tools/list").json() == expected
+    assert rpc(client, "tools/list").json() == {key: value for key, value in expected.items()
+                                                if key != "interface_version"}
     main()
     assert json.loads(capsys.readouterr().out) == expected
 
@@ -1170,3 +1171,26 @@ def test_github_app_signs_and_reuses_installation_token(tmp_path, monkeypatch):
 
     asyncio.run(check())
     assert requests == ["/app/installations/456/access_tokens", "/installation/repositories", "/installation/repositories"]
+
+
+# Huellas congeladas. Agrega una entrada al publicar otra versión.
+INTERFACE_SIGNATURES = {
+    1: "a12a0632f38d02e2f21cd0c3f15b9d180c69755b1a45bbd2463e410adaec9ebc",
+    2: "0aad53162ff1d9e541f7c1ee46ca7d33d0c7b2a4261727db110388ea43aa94fb",
+}
+
+
+def test_tool_signature_requires_a_new_interface_version(client):
+    from pathlib import Path
+
+    reference = json.loads(Path("docs/tools-list.json").read_text())
+    tools = rpc(client, "tools/list").json()["result"]["tools"]
+    fields = ("name", "inputSchema", "outputSchema")
+    signature = [{key: tool[key] for key in fields if key in tool}
+                 for tool in sorted(tools, key=lambda tool: tool["name"])]
+    fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    version = reference["interface_version"]
+    assert version == max(INTERFACE_SIGNATURES)
+    assert fingerprint == INTERFACE_SIGNATURES[version], (
+        f"Cambió la firma MCP. Publica una nueva interface_version con huella {fingerprint}."
+    )

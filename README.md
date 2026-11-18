@@ -124,3 +124,5 @@ python -m tools.export_section 01 --db data/grader.db > seccion-01.csv
 El [JSON de tools/list](docs/tools-list.json) se genera desde el servidor local con `python -m tools.generate_tool_reference > docs/tools-list.json`. Las firmas publicadas se mantienen estables durante el semestre. Una prueba compara la referencia con la respuesta HTTP del servidor.
 
 Consulta el [runbook](docs/runbook.md) para configurar el proxy, las credenciales, las ventanas, el respaldo y el procedimiento de actualización.
+
+La referencia generada lleva `interface_version`. La versión 2 requiere `github_repository` en `register_team`. El campo de versión pertenece al artefacto de documentación. Para publicar un cambio de firma autorizado, incrementa `INTERFACE_VERSION` en el generador, regenera el JSON y añade la huella de la nueva versión en `INTERFACE_SIGNATURES` en las pruebas. Conserva las huellas de versiones ya publicadas.
