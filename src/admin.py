@@ -183,7 +183,12 @@ async def upload_roster(request: Request):
 
 @admin_only
 async def github_health(request: Request):
-    return JSONResponse({"github_credential_status": await github.credential_status()}, headers=NO_STORE)
+    status = await github.credential_status()
+    coverage = await github.app_repository_coverage()
+    if coverage == "seleccionados":
+        logger.warning("La GitHub App debe instalarse para todos los repositorios de la organización")
+    return JSONResponse({"github_credential_status": status,
+                         "github_app_repository_coverage": coverage}, headers=NO_STORE)
 
 
 @admin_only

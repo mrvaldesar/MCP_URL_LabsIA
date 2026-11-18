@@ -101,6 +101,8 @@ async def recover_credential():
     try:
         if path is None or path.startswith("/app/installations/"):
             healthy = await credential_status() == "valida"
+        elif path.startswith("/orgs/") and path.endswith("/installation"):
+            healthy = await app_repository_coverage() in ("todos", "seleccionados")
         else:
             async with _client() as client:
                 response = await _request(client, path)
@@ -113,22 +115,50 @@ async def recover_credential():
         logger.info("Se recuperó la credencial de GitHub")
 
 
-async def _app_token(client, config):
-    global _installation_token
+def _app_assertion(config):
     app_id, installation_id, key_path = config
     if not re.fullmatch(r"[0-9]+", app_id) or not re.fullmatch(r"[0-9]+", installation_id) or not key_path:
         _credential_error("configuración_app")
+    now = int(time())
+    try:
+        return jwt.encode({"iss": app_id, "iat": now - 60, "exp": now + 540},
+                          Path(key_path).read_bytes(), algorithm="RS256")
+    except (OSError, ValueError, jwt.PyJWTError):
+        _credential_error("clave_app")
+
+
+async def app_repository_coverage() -> str:
+    config = _app_config()
+    if not any(config):
+        return "no_aplica"
+    organization = os.getenv("GITHUB_COURSE_ORG", "")
+    if not ORG_PATTERN.fullmatch(organization):
+        return "desconocida"
+    try:
+        assertion = _app_assertion(config)
+        async with _client(public=True) as client:
+            client.headers["Authorization"] = f"Bearer {assertion}"
+            installation = await _get(client, f"/orgs/{organization}/installation")
+    except GitHubVerificationError:
+        return "desconocida"
+    if str(installation.get("id")) != config[1] or installation.get("suspended_at"):
+        return "desconocida"
+    return {"all": "todos", "selected": "seleccionados"}.get(
+        installation.get("repository_selection") if isinstance(installation.get("repository_selection"), str) else "",
+        "desconocida",
+    )
+
+
+async def _app_token(client, config):
+    global _installation_token
+    _, installation_id, _ = config
     async with _token_lock:
         now = datetime.now(timezone.utc).timestamp()
         if _installation_token:
             cached_config, token, expiry = _installation_token
             if cached_config == config and expiry > now + 60:
                 return token
-        try:
-            assertion = jwt.encode({"iss": app_id, "iat": int(now) - 60, "exp": int(now) + 540},
-                                   Path(key_path).read_bytes(), algorithm="RS256")
-        except (OSError, ValueError, jwt.PyJWTError):
-            _credential_error("clave_app")
+        assertion = _app_assertion(config)
         try:
             response = await client.post(f"/app/installations/{installation_id}/access_tokens",
                                          headers={"Authorization": f"Bearer {assertion}"})

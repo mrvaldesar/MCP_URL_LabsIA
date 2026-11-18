@@ -796,7 +796,9 @@ def test_admin_retry_and_credential_health(client, grader_db, monkeypatch):
     result = client.post(path, headers=headers)
     assert result.json() == {"receipt_id": 1, "verification_status": "verificado", "verified_ci_status": "exitoso", "verification_retry_count": 1}
     assert client.post(path, headers=headers).status_code == 404
-    assert client.get("/admin/github/health", headers=headers).json() == {"github_credential_status": "valida"}
+    assert client.get("/admin/github/health", headers=headers).json() == {
+        "github_credential_status": "valida", "github_app_repository_coverage": "no_aplica",
+    }
 
 @pytest.mark.parametrize(("bad", "hint"), [
     ({"deliverable_id": "D11"}, "Usa un entregable"),
@@ -1339,3 +1341,26 @@ def test_retry_credential_failure_refunds_and_pauses(client, monkeypatch):
     assert asyncio.run(verification.retry(1, "02", "docente"))[1]["verification_retry_count"] == 0
     assert asyncio.run(verification.retry(1, "02", "docente")) == ("programado", (0, 0))
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(("selection", "coverage"), [("all", "todos"), ("selected", "seleccionados")])
+def test_app_coverage_uses_organization_installation_metadata(client, monkeypatch, grader_db, selection, coverage):
+    monkeypatch.setenv("GITHUB_APP_ID", "123")
+    monkeypatch.setenv("GITHUB_APP_INSTALLATION_ID", "456")
+    monkeypatch.setattr(github, "_app_assertion", lambda config: "synthetic-app-jwt")
+
+    async def status():
+        return "valida"
+
+    async def request(http_client, path):
+        assert path == "/orgs/curso/installation"
+        assert http_client.headers["authorization"] == "Bearer synthetic-app-jwt"
+        return httpx.Response(200, json={"id": 456, "repository_selection": selection})
+
+    monkeypatch.setattr(github, "credential_status", status)
+    monkeypatch.setattr(github, "_request", request)
+    headers = {"Authorization": "Bearer admin-test-credential"}
+    result = client.get("/admin/github/health", headers=headers)
+    assert result.json()["github_app_repository_coverage"] == coverage
+    if selection == "selected":
+        assert "debe instalarse para todos" in grader_db.with_name("grader.log").read_text()
