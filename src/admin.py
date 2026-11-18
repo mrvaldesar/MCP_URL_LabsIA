@@ -185,6 +185,7 @@ async def upload_roster(request: Request):
 async def github_health(request: Request):
     status = await github.credential_status()
     coverage = await github.app_repository_coverage()
+    request.app.state.github_app_coverage = coverage
     if coverage == "seleccionados":
         logger.warning("La GitHub App debe instalarse para todos los repositorios de la organización")
     return JSONResponse({"github_credential_status": status,

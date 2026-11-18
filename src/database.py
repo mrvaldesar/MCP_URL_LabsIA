@@ -481,3 +481,21 @@ def update_repository_verification(team_id, repository, section, status, next_at
             UPDATE teams SET repository_verification_status = ?, repository_verification_next_at = ?
             WHERE id = ? AND github_repository = ? AND section = ? AND repository_verification_status = 'pendiente'
         """, (status, next_at, team_id, repository, section)).rowcount == 1
+
+def verification_health_counts(minutes: int, max_attempts: int, window: int) -> dict[str, int]:
+    with _connect() as conn:
+        receipts = conn.execute("""
+            SELECT COUNT(*),
+                COUNT(CASE WHEN julianday(received_at_utc) < julianday('now', ?) THEN 1 END),
+                COUNT(CASE WHEN verification_retry_count >= ?
+                     OR COALESCE(NULLIF(verification_retry_started_at, 0), unixepoch(received_at_utc)) + ?
+                        <= unixepoch() THEN 1 END)
+            FROM submissions WHERE verification_status = 'pendiente'
+        """, (f"-{minutes} minutes", max_attempts, window)).fetchone()
+        repositories = conn.execute("""
+            SELECT COUNT(CASE WHEN repository_verification_status = 'pendiente' THEN 1 END),
+                   COUNT(CASE WHEN repository_verification_status = 'inconsistente' THEN 1 END)
+            FROM teams WHERE github_repository IS NOT NULL
+        """).fetchone()
+    return dict(zip(("pending_receipts", "stale_pending_receipts", "exhausted_pending_receipts",
+                     "pending_repositories", "inconsistent_repositories"), (*receipts, *repositories)))

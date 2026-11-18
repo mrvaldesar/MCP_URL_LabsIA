@@ -223,7 +223,8 @@ def test_health_without_authentication(client):
     response = client.get("/health")
     assert response.status_code == 200
     payload = response.json()
-    assert payload.keys() == {"status", "timestamp", "stale_verification_count", "stale_verification_minutes"}
+    assert payload.keys() == {"status", "timestamp", "stale_verification_count", "stale_verification_minutes",
+                              "verification_monitor"}
     assert payload["status"] == "ok"
     assert datetime.fromisoformat(payload["timestamp"]).utcoffset() == timedelta(0)
 
@@ -1418,3 +1419,36 @@ def test_pending_repository_absence_after_recovery_keeps_team(client, monkeypatc
     asyncio.run(verification.retry_batch())
     assert database.list_teams(None)[0]["repository_verification_status"] == "inconsistente"
     assert database.resolve_team_id(response.headers["X-Team-Token"]) == 1
+
+
+def test_public_monitor_exposes_stable_counts_without_github_calls(grader_db, github_api, monkeypatch):
+    coverage_checks = []
+
+    async def coverage():
+        coverage_checks.append(True)
+        return "seleccionados"
+
+    monkeypatch.setattr(github, "app_repository_coverage", coverage)
+    with TestClient(create_server().streamable_http_app(), base_url="http://localhost:8000") as client:
+        token = register(client, "Equipo monitor", [MEMBER]).headers["X-Team-Token"]
+        submit(client, token, deliverable_id="D3", label="D3")
+        with closing(sqlite3.connect(grader_db)) as conn, conn:
+            conn.execute("UPDATE submissions SET received_at_utc = datetime('now', '-3 days')")
+            conn.execute("UPDATE teams SET repository_verification_status = 'pendiente'")
+        before = len(github_api)
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json()["verification_monitor"] == {
+            "pending_receipts": 1,
+            "stale_pending_receipts": 1,
+            "exhausted_pending_receipts": 1,
+            "pending_repositories": 1,
+            "inconsistent_repositories": 0,
+            "credential_alerts": 1,
+            "app_coverage_alerts": 1,
+        }
+        assert len(github_api) == before
+        assert len(coverage_checks) == 1
+        assert token not in response.text and "Equipo monitor" not in response.text
+        assert "Cobertura de todos los repositorios" in grader_db.with_name("grader.log").read_text()

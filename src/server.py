@@ -16,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from src import database, verification
+from src import database, github, verification
 from src.admin import ROUTES
 from src.audit import AuditMiddleware, audit_log, logger
 from src.auth import TeamAuthMiddleware
@@ -34,15 +34,20 @@ async def health(request: Request):
         migrations_match = await run_in_threadpool(database.check_health)
         if migrations_match:
             threshold = verification.stale_minutes()
-            aged = await run_in_threadpool(database.aged_pending_count, threshold)
+            counts = await run_in_threadpool(database.verification_health_counts, threshold,
+                                             verification.max_attempts(), verification.retry_window())
     except sqlite3.Error:
         logger.exception("Falló el chequeo de SQLite")
         return JSONResponse({"status": "unavailable"}, status_code=503)
     if not migrations_match:
         logger.warning("Las migraciones aplicadas no coinciden con los archivos del despliegue")
         return JSONResponse({"status": "unavailable"}, status_code=503)
+    counts["credential_alerts"] = int(github.credential_alert_active())
+    counts["app_coverage_alerts"] = int(request.app.state.github_app_coverage in ("seleccionados", "desconocida"))
     return JSONResponse({"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat(),
-                         "stale_verification_count": aged, "stale_verification_minutes": threshold})
+                         "stale_verification_count": counts["stale_pending_receipts"],
+                         "stale_verification_minutes": threshold, "verification_monitor": counts},
+                        headers={"Cache-Control": "no-store"})
 
 
 VALIDATION_HINTS = {
@@ -94,6 +99,9 @@ class GraderMCP(FastMCP):
                 except Exception:
                     logger.exception("No se pudo inicializar SQLite")
                     raise
+                app.state.github_app_coverage = await github.app_repository_coverage()
+                if app.state.github_app_coverage in ("seleccionados", "desconocida"):
+                    logger.warning("Cobertura de todos los repositorios de la GitHub App sin confirmar")
                 async with transport_lifespan(app), verification.background_retries():
                     yield
 

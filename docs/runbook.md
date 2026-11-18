@@ -210,3 +210,13 @@ La instalación de la GitHub App debe seleccionar **All repositories** para la o
 Si GitHub está indisponible, limita las solicitudes, rechaza la credencial o no permite confirmar un 404, el registro entrega la credencial de equipo y deja el repositorio pendiente. La migración `009_team_repository_verification.sql` guarda ese estado. El proceso reintenta la comprobación y `GET /admin/teams` muestra `repository_verification_status`. Si después confirma que el repositorio falta o es incompatible, marca `inconsistente` y conserva el equipo para que el docente corrija la asignación.
 
 Un 404 definitivo requiere que la App cubra todos los repositorios y que su credencial de instalación pueda consultar GitHub. Con un token de grano fino, configura `GITHUB_PAT_ALL_REPOSITORIES=true` solo si confirmaste que el token y su titular tienen visibilidad de todos los repositorios privados de la organización. El servicio verifica además que el token pueda ver repositorios privados. Sin esa confirmación, un 404 deja el registro pendiente.
+
+### Monitor externo
+
+Configura un chequeo HTTPS a `GET /health` cada 60 segundos durante las recepciones. Alerta si el HTTP deja de ser 200 y evalúa el objeto estable `verification_monitor` en cada respuesta 200. Sus campos son enteros no negativos. El endpoint lee SQLite y la señal de credencial en memoria. La cobertura de la App se consulta al arrancar y se actualiza al consultar `GET /admin/github/health`. La consulta del monitor se atiende sin llamar a GitHub.
+
+- Alerta con `stale_pending_receipts > 0` o `exhausted_pending_receipts > 0` para detectar recibos que necesitan revisión.
+- Alerta con `credential_alerts > 0` o `app_coverage_alerts > 0` para detectar problemas de credencial o instalación. Cada indicador tiene valor 0 o 1.
+- Supervisa `pending_receipts`, `pending_repositories` e `inconsistent_repositories`. Si estos conteos suben, revisa el CSV y `GET /admin/teams` con credenciales docentes.
+
+El objeto público contiene solo conteos globales. Mantén las credenciales administrativas fuera del monitor.
