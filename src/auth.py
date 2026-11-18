@@ -1,4 +1,6 @@
 import json
+import os
+from ipaddress import ip_address, ip_network
 import re
 from hashlib import sha256
 
@@ -33,11 +35,43 @@ def rate_limit_response(request: dict, retry_after: int, *, registration: bool =
     )
 
 
+def client_ip(scope: Scope, trusted_proxies) -> str:
+    peer = scope.get("client")
+    if not peer:
+        return "unknown"
+    try:
+        address = ip_address(peer[0])
+    except ValueError:
+        return peer[0]
+    for hop in reversed(Headers(scope=scope).get("x-forwarded-for", "").split(",")):
+        if not any(address in network for network in trusted_proxies):
+            break
+        try:
+            address = ip_address(hop.strip())
+        except ValueError:
+            break
+    return str(address)
+
+
+def configured_limit(name: str, default: int) -> int:
+    value = int(os.getenv(name, str(default)))
+    if value < 1:
+        raise ValueError(f"{name} debe ser un entero positivo.")
+    return value
+
+
 class TeamAuthMiddleware:
     def __init__(self, app: ASGIApp, path: str):
         self.app = app
         self.path = path
-        self.registration_limit = SlidingWindow(limit=5, seconds=600)
+        seconds = configured_limit("REGISTER_WINDOW_SECONDS", 600)
+        self.registration_limit = SlidingWindow(configured_limit("REGISTER_IP_LIMIT", 80), seconds)
+        self.global_limit = SlidingWindow(configured_limit("REGISTER_GLOBAL_LIMIT", 256), seconds)
+        self.carnet_limit = SlidingWindow(configured_limit("REGISTER_CARNET_FAILURE_LIMIT", 5), seconds)
+        self.trusted_proxies = tuple(
+            ip_network(value.strip())
+            for value in os.getenv("TRUSTED_PROXY_CIDRS", "").split(",") if value.strip()
+        )
         self.submission_limit = SlidingWindow(limit=10, seconds=60)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
@@ -69,15 +103,18 @@ class TeamAuthMiddleware:
         tool = params.get("name") if method == "tools/call" and isinstance(params, dict) else None
         registration = tool == "register_team"
 
+        state = scope.setdefault("state", {})
         if registration:
-            client = scope.get("client")
-            ip = client[0] if client else "unknown"
+            ip = client_ip(scope, self.trusted_proxies)
             retry_after = self.registration_limit.retry_after(ip)
+            if retry_after is None:
+                retry_after = self.global_limit.retry_after("all")
             if retry_after is not None:
                 await rate_limit_response(request, retry_after, registration=True)(scope, receive, send)
                 return
 
-        state = scope.setdefault("state", {})
+            state["carnet_limit"] = self.carnet_limit
+
         if method not in PUBLIC_METHODS and not registration:
             authorization = Headers(scope=scope).get("authorization", "")
             scheme, _, token = authorization.partition(" ")

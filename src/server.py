@@ -88,10 +88,20 @@ def register_team(
         raise ValueError("El nombre del equipo es obligatorio.")
     validate_team_size(modality, len(members))
 
+    carnet_limit = request.state.carnet_limit
+    for member in members:
+        retry_after = carnet_limit.retry_after(member.carnet, consume=False)
+        if retry_after is not None:
+            raise ValueError(f"Demasiados intentos de registro para un carné. Reintenta en {retry_after} segundos.")
+
     try:
         request.state.issued_team_token = register_team_db(
             team_name, section, modality, [member.model_dump() for member in members]
         )
+    except database.RosterMismatch as exc:
+        for carnet in set(exc.carnets):
+            carnet_limit.retry_after(carnet)
+        raise
     except ValueError:
         raise
     except Exception:
@@ -166,4 +176,6 @@ def create_server() -> GraderMCP:
 mcp = create_server()
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    import uvicorn
+
+    uvicorn.run(mcp.streamable_http_app(), host="0.0.0.0", port=8000, proxy_headers=False)

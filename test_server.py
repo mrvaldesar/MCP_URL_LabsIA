@@ -242,7 +242,9 @@ def test_teacher_routes_and_audit(client, grader_db):
     assert all(json.loads(line)["timestamp"] for line in log.splitlines())
 
 
-def test_register_team_limit_is_per_ip_and_only_applies_to_registration(client, monkeypatch):
+def test_register_team_limit_is_per_ip_and_only_applies_to_registration(grader_db, monkeypatch, request):
+    monkeypatch.setenv("REGISTER_IP_LIMIT", "5")
+    client = request.getfixturevalue("client")
     now = 1000
     monkeypatch.setattr(rate_limit, "monotonic", lambda: now)
     for index in range(5):
@@ -658,3 +660,33 @@ def test_empty_roster_startup_and_custom_carnet(client, grader_db, monkeypatch):
     assert "X-Team-Token" not in register(client, "Formato antiguo", [MEMBER]).headers
     member = MEMBER | {"carnet": "A12345678"}
     assert "X-Team-Token" in register(client, "Formato configurado", [member]).headers
+
+
+def test_campus_capacity_and_fabricated_carnets(client, monkeypatch):
+    monkeypatch.delenv("STRICT_ROSTER")
+    members = [{"github_user": f"alumna-{n}", "carnet": f"{n:07d}"} for n in range(40)]
+    database.replace_roster("02", [(m["github_user"], m["carnet"]) for m in members])
+    for n, member in enumerate(members):
+        assert "X-Team-Token" in register(client, f"Equipo {n}", [member]).headers
+    for n in range(100):
+        response = register(client, "Inventado", [{"github_user": "inventado", "carnet": f"{n+100:07d}"}])
+        assert "X-Team-Token" not in response.headers
+        if n >= 40:
+            assert response.status_code == 429
+
+
+def test_repeated_failed_carnet(client, monkeypatch):
+    monkeypatch.delenv("STRICT_ROSTER")
+    for _ in range(5):
+        assert "padrón" in register(client, "Inventado", [MEMBER]).text
+    assert "Demasiados intentos" in register(client, "Inventado", [MEMBER]).text
+
+
+def test_proxy_trust_boundary():
+    from ipaddress import ip_network
+    from src.auth import client_ip
+
+    networks = (ip_network("10.0.0.0/24"),)
+    headers = [(b"x-forwarded-for", b"198.51.100.99, 192.0.2.11, 10.0.0.9")]
+    assert client_ip({"client": ("10.0.0.8", 1), "headers": headers}, networks) == "192.0.2.11"
+    assert client_ip({"client": ("192.0.2.12", 1), "headers": headers}, networks) == "192.0.2.12"
