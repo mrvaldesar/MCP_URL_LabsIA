@@ -61,6 +61,8 @@ def github_api(monkeypatch):
         assert request.url.host == "api.github.com"
         assert request.headers["Authorization"] == "Bearer github-test-credential"
         parts = request.url.path.split("/")
+        if parts[1:] == ["orgs", "curso", "repos"]:
+            return httpx.Response(200, json=[{"private": True}])
         assert parts[1:3] == ["repos", "curso"]
         if parts[3].startswith("lab-ia-"):
             if parts[3].endswith("inexistente"):
@@ -72,6 +74,10 @@ def github_api(monkeypatch):
             return httpx.Response(200 if len(parts) == 5 else 404)
         assert parts[3] in {f"equipo-{team_id}" for team_id in range(1, 21)}
         path = parts[4:]
+        if len(path) == 3 and path[-1] == "status":
+            return httpx.Response(200, json={"state": "success", "total_count": 1})
+        if len(path) == 3 and path[-1] == "check-runs":
+            return httpx.Response(200, json={"total_count": 0, "check_runs": []})
         if not path:
             return httpx.Response(200, json={"full_name": "/".join(parts[2:4])})
         if path == ["commits", "abc1235"]:
@@ -93,6 +99,14 @@ def github_api(monkeypatch):
         target = {"type": "commit", "sha": commit_sha}
         if label == "D5":
             target["sha"] = "abc1235" + "0" * 33
+        if label == "D7":
+            return httpx.Response(502)
+        if label == "D8":
+            raise httpx.ConnectError("sin red", request=request)
+        if label == "D9":
+            return httpx.Response(200, content=b"{")
+        if label == "D10":
+            return httpx.Response(429)
         if label == "D6":
             target = {"type": "tag", "sha": tag_sha}
         return httpx.Response(200, json={"ref": f"refs/tags/{label}", "object": target})
@@ -163,6 +177,7 @@ def test_submission_requires_bearer_and_uses_authenticated_section(client, grade
     assert first == {
         "receipt_id": 1, "deliverable_id": "D1", "label": "D1", "section": "02",
         "status": "received", "attempt": 1, "received_at_utc": first["received_at_utc"],
+        "verification_status": "verificado", "verified_ci_status": "exitoso",
     }
     assert datetime.fromisoformat(first["received_at_utc"]).utcoffset() == timedelta(0)
     assert second["attempt"] == 2
@@ -283,7 +298,7 @@ def test_sql_migrations_run_once(grader_db):
     with closing(sqlite3.connect(grader_db)) as conn:
         assert conn.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall() == [
             ("001_initial_schema.sql",), ("002_teacher_operations.sql",),
-            ("003_team_github_repository.sql",),
+            ("003_team_github_repository.sql",), ("004_github_verification.sql",),
         ]
 
 
@@ -427,7 +442,7 @@ def test_github_annotated_tag_saves_verified_sha(client, grader_db, github_api):
     assign_repository(grader_db)
     result = submit(client, token, deliverable_id="D6", label="D6").json()["result"]
     assert result["isError"] is False
-    assert len(github_api) == 3
+    assert len(github_api) == 5
     assert github_api[0].url.raw_path.endswith(b"/git/ref/tags/D6")
     with closing(sqlite3.connect(grader_db)) as conn:
         assert conn.execute("SELECT commit_hash FROM submissions").fetchall() == [("abc1234" + "0" * 33,)]
@@ -436,8 +451,6 @@ def test_github_annotated_tag_saves_verified_sha(client, grader_db, github_api):
 @pytest.mark.parametrize(("label", "commit_hash", "message"), [
     ("D2", "abc1234", "Etiqueta no encontrada"),
     ("D5", "abc1235", "Commit inexistente"),
-    ("D3", "abc1234", "Intenta más tarde"),
-    ("D4", "abc1234", "Intenta más tarde"),
     ("D1", "deadbee", "apunta a otro commit"),
 ])
 def test_github_rejection_writes_no_receipt(client, grader_db, label, commit_hash, message):
@@ -663,7 +676,7 @@ def test_concurrent_team_registration_and_submission(grader_db, github_api, monk
         assert {row[0]: row[1:3] for row in rows} == receipts
         assert all(row[3:] == ("D1", "D1", 1, "abc1234" + "0" * 33, "{}", 1) for row in rows)
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-    assert len(github_api) == 40
+    assert len(github_api) == 80
 
 
 def test_empty_roster_startup_and_custom_carnet(client, grader_db, monkeypatch):
@@ -733,3 +746,32 @@ def test_public_annotated_tag():
             sha = tag["object"]["sha"]
             assert await github.resolve_tag(client, path, "v2.45.0", sha[:12]) == sha
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("deliverable", ["D3", "D4", "D7", "D8", "D9", "D10"])
+def test_github_failure_keeps_receipt(client, grader_db, deliverable):
+    token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    assign_repository(grader_db)
+    receipt = submit(client, token, deliverable_id=deliverable, label=deliverable).json()["result"]["structuredContent"]
+    assert receipt["verification_status"] == "pendiente"
+    assert receipt["verified_ci_status"] == "desconocido"
+    with closing(sqlite3.connect(grader_db)) as conn:
+        assert conn.execute("SELECT verification_status, commit_hash FROM submissions").fetchone() == ("pendiente", "abc1234")
+
+
+def test_admin_retry_and_credential_health(client, grader_db, monkeypatch):
+    from src import server
+    token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    assign_repository(grader_db)
+
+    async def unavailable(*args):
+        raise github.GitHubUnavailable()
+    monkeypatch.setattr(server, "verify_submission", unavailable)
+    receipt = submit(client, token).json()["result"]["structuredContent"]
+    assert receipt["verification_status"] == "pendiente"
+    headers = {"Authorization": "Bearer admin-test-credential"}
+    path = f"/admin/submissions/{receipt['receipt_id']}/retry-verification"
+    result = client.post(path, headers=headers)
+    assert result.json() == {"receipt_id": 1, "verification_status": "verificado", "verified_ci_status": "exitoso"}
+    assert client.post(path, headers=headers).status_code == 404
+    assert client.get("/admin/github/health", headers=headers).json() == {"github_credential_status": "valida"}

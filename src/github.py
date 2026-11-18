@@ -151,3 +151,64 @@ async def verify_submission(repository: str, label: str, commit_hash: str) -> st
     path = _repo_path(repository)
     async with _client() as client:
         return await resolve_tag(client, path, label, commit_hash)
+
+
+async def verified_ci_status(repository: str, sha: str) -> str:
+    try:
+        path = _repo_path(repository)
+        async with _client() as client:
+            summary = await _get(client, f"{path}/commits/{sha}/status")
+            checks = await _get(client, f"{path}/commits/{sha}/check-runs?per_page=100")
+        runs = checks.get("check_runs")
+        count = checks.get("total_count")
+        status = summary.get("state")
+        statuses = summary.get("total_count")
+        if not isinstance(runs, list) or count != len(runs) or not isinstance(statuses, int):
+            return "desconocido"
+        conclusions = set()
+        for run in runs:
+            if not isinstance(run, dict) or run.get("head_sha") != sha:
+                return "desconocido"
+            conclusion = run.get("conclusion") if run.get("status") == "completed" else "pending"
+            if not isinstance(conclusion, str):
+                return "desconocido"
+            conclusions.add(conclusion)
+        if conclusions & {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"} or (
+            statuses and status in ("failure", "error")
+        ):
+            return "fallido"
+        if "pending" in conclusions or (statuses and status == "pending"):
+            return "pendiente"
+        if conclusions <= {"success", "neutral", "skipped"} and (
+            (not statuses and "success" in conclusions) or status == "success"
+        ):
+            return "exitoso"
+    except GitHubVerificationError:
+        pass
+    return "desconocido"
+
+
+async def credential_status() -> str:
+    try:
+        path = _repo_path("health-placeholder")
+    except GitHubUnavailable:
+        return "sin_configurar"
+    organization = path.split("/")[2]
+    try:
+        async with _client() as client:
+            response = await _request(client, f"/orgs/{organization}/repos?type=private&per_page=1")
+    except GitHubUnavailable:
+        return "indisponible"
+    if response.status_code == 401:
+        return "invalida"
+    if not response.is_success:
+        return "indisponible"
+    try:
+        repositories = response.json()
+    except ValueError:
+        return "indisponible"
+    if isinstance(repositories, list) and any(
+        isinstance(repo, dict) and repo.get("private") is True for repo in repositories
+    ):
+        return "valida"
+    return "acceso_privado_no_confirmado"

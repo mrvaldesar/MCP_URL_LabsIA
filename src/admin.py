@@ -14,6 +14,7 @@ from src import database
 from src.audit import logger
 from src.auth import MAX_REQUEST_BYTES, TOKEN_PATTERN
 from src.export import export_section
+from src import github
 from src.models import Member, Modality, Section
 
 NO_STORE = {"Cache-Control": "no-store"}
@@ -130,7 +131,40 @@ async def upload_roster(request: Request):
     return JSONResponse({"section": roster.section, "members_imported": len(members)})
 
 
+@admin_only
+async def github_health(request: Request):
+    return JSONResponse({"github_credential_status": await github.credential_status()}, headers=NO_STORE)
+
+
+@admin_only
+async def retry_verification(request: Request):
+    receipt_id = request.path_params["id"]
+    pending = None
+    if 0 < receipt_id <= 2**63 - 1:
+        pending = await run_in_threadpool(database.pending_submission, receipt_id, None)
+    if pending is None:
+        return JSONResponse({"error": "Recibo pendiente no encontrado."}, status_code=404)
+    repository, label, sha = pending
+    ci = "desconocido"
+    try:
+        sha = await github.verify_submission(repository, label, sha)
+    except github.GitHubUnavailable:
+        return JSONResponse({"receipt_id": receipt_id, "verification_status": "pendiente"}, status_code=202)
+    except github.GitHubVerificationError:
+        status = "inconsistente"
+    else:
+        status = "verificado"
+        ci = await github.verified_ci_status(repository, sha)
+    updated = await run_in_threadpool(database.finish_verification, receipt_id, sha, status, ci, None)
+    if not updated:
+        return JSONResponse({"error": "El recibo cambió. Consulta el CSV."}, status_code=409)
+    logger.info("Verificación reintentada recibo=%d estado=%s", receipt_id, status)
+    return JSONResponse({"receipt_id": receipt_id, "verification_status": status, "verified_ci_status": ci})
+
+
 ROUTES = [
+    Route("/admin/github/health", github_health, methods=["GET"]),
+    Route("/admin/submissions/{id:int}/retry-verification", retry_verification, methods=["POST"]),
     Route("/admin/teams/{id:int}/update", update_team, methods=["POST"]),
     Route("/admin/teams/{id:int}/rotate-token", rotate_token, methods=["POST"]),
     Route("/admin/export", download_export, methods=["GET"]),

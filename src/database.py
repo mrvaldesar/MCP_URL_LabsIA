@@ -24,6 +24,8 @@ class Receipt(TypedDict):
     status: str
     attempt: int
     section: str
+    verification_status: str
+    verified_ci_status: str
 
 
 @contextmanager
@@ -215,6 +217,8 @@ def save_submission_db(
     metrics_json: str,
     is_ci_passing: bool,
     repository: str,
+    verification_status: str = "verificado",
+    verified_ci_status: str = "desconocido",
 ) -> Receipt:
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -234,9 +238,11 @@ def save_submission_db(
         cursor = conn.execute("""
             INSERT INTO submissions (
                 team_id, deliverable_id, label, commit_hash, declared_metrics_json,
-                declared_is_ci_passing, received_at_utc, attempt
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (team_id, deliverable_id, label, commit_hash, metrics_json, is_ci_passing, received_at, attempt))
+                declared_is_ci_passing, received_at_utc, attempt, github_repository, verification_status,
+                verified_ci_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (team_id, deliverable_id, label, commit_hash, metrics_json, is_ci_passing, received_at, attempt,
+              repository, verification_status, verified_ci_status))
         return Receipt(
             receipt_id=cursor.lastrowid,
             deliverable_id=deliverable_id,
@@ -245,6 +251,8 @@ def save_submission_db(
             status="received",
             attempt=attempt,
             section=section,
+            verification_status=verification_status,
+            verified_ci_status=verified_ci_status,
         )
 
 
@@ -311,3 +319,20 @@ def check_health() -> bool:
     with _connect() as conn:
         applied = {name for (name,) in conn.execute("SELECT name FROM schema_migrations")}
     return bool(expected) and applied == expected
+
+def pending_submission(receipt_id: int, section: str | None):
+    with _connect() as conn:
+        return conn.execute("""
+            SELECT s.github_repository, s.label, s.commit_hash FROM submissions AS s
+            JOIN teams AS t ON t.id = s.team_id
+            WHERE s.id = ? AND s.verification_status = 'pendiente' AND (? IS NULL OR t.section = ?)
+        """, (receipt_id, section, section)).fetchone()
+
+
+def finish_verification(receipt_id: int, sha: str, status: str, ci: str, section: str | None) -> bool:
+    with _connect() as conn:
+        return conn.execute("""
+            UPDATE submissions SET commit_hash = ?, verification_status = ?, verified_ci_status = ?
+            WHERE id = ? AND verification_status = 'pendiente'
+              AND (? IS NULL OR team_id IN (SELECT id FROM teams WHERE section = ?))
+        """, (sha, status, ci, receipt_id, section, section)).rowcount == 1

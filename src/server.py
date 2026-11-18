@@ -20,7 +20,7 @@ from src.admin import ROUTES
 from src.audit import AuditMiddleware, audit_log, logger
 from src.auth import TeamAuthMiddleware
 from src.database import Receipt, get_team_repository, init_db, register_team_db, save_submission_db
-from src.github import validate_repository, verify_submission
+from src.github import GitHubUnavailable, validate_repository, verified_ci_status, verify_submission
 from src.models import CARNET_PATTERN, Member, Modality, Section, validate_team_size
 
 COMMIT_PATTERN = r"^[0-9a-f]{7,40}$"
@@ -156,9 +156,15 @@ async def submit_lab_results(
         repository = await run_in_threadpool(get_team_repository, team_id)
         if repository is None:
             raise ValueError("El equipo no tiene un repositorio de GitHub asignado. Avisa al docente.")
-        verified_sha = await verify_submission(repository, label, commit_hash)
+        try:
+            verified_sha = await verify_submission(repository, label, commit_hash)
+        except GitHubUnavailable:
+            verified_sha, verification, ci = commit_hash, "pendiente", "desconocido"
+        else:
+            verification = "verificado"
+            ci = await verified_ci_status(repository, verified_sha)
         return await run_in_threadpool(
-            save_submission_db, team_id, deliverable_id, label, verified_sha, metrics_json, is_ci_passing, repository
+            save_submission_db, team_id, deliverable_id, label, verified_sha, metrics_json, is_ci_passing, repository, verification, ci
         )
     except ValueError:
         raise
