@@ -56,6 +56,7 @@ def github_api(monkeypatch):
     requests = []
     commit_sha = "abc1234" + "0" * 33
     tag_sha = "1" * 40
+    nested_sha = "2" * 40
 
     def handle(request):
         requests.append(request)
@@ -66,6 +67,8 @@ def github_api(monkeypatch):
             return httpx.Response(200, json=[{"private": True}])
         assert parts[1:3] == ["repos", "curso"]
         if parts[3].startswith("lab-ia-"):
+            if parts[3].endswith("sin-red"):
+                raise httpx.ConnectError("sin red", request=request)
             if parts[3].endswith("inexistente"):
                 return httpx.Response(404)
             if len(parts) == 4:
@@ -87,6 +90,10 @@ def github_api(monkeypatch):
             return httpx.Response(200, json={"sha": "deadbee" + "0" * 33})
         if path == ["commits", "abc1234"]:
             return httpx.Response(200, json={"sha": commit_sha})
+        if path == ["git", "matching-refs", "tags"]:
+            return httpx.Response(404) if parts[3] == "equipo-2" else httpx.Response(200, json=[])
+        if path == ["git", "tags", nested_sha]:
+            return httpx.Response(200, json={"object": {"type": "tag", "sha": tag_sha}})
         if path == ["git", "tags", tag_sha]:
             return httpx.Response(200, json={"object": {"type": "commit", "sha": commit_sha}})
         assert path[:3] == ["git", "ref", "tags"]
@@ -109,7 +116,7 @@ def github_api(monkeypatch):
         if label == "D10":
             return httpx.Response(429)
         if label == "D6":
-            target = {"type": "tag", "sha": tag_sha}
+            target = {"type": "tag", "sha": nested_sha}
         return httpx.Response(200, json={"ref": f"refs/tags/{label}", "object": target})
 
     client_class = httpx.AsyncClient
@@ -445,7 +452,7 @@ def test_github_annotated_tag_saves_verified_sha(client, grader_db, github_api):
     assign_repository(grader_db)
     result = submit(client, token, deliverable_id="D6", label="D6").json()["result"]
     assert result["isError"] is False
-    assert len(github_api) == 5
+    assert len(github_api) == 6
     assert github_api[0].url.raw_path.endswith(b"/git/ref/tags/D6")
     with closing(sqlite3.connect(grader_db)) as conn:
         assert conn.execute("SELECT commit_hash FROM submissions").fetchall() == [("abc1234" + "0" * 33,)]
@@ -724,6 +731,7 @@ def test_proxy_trust_boundary():
     ("lab-ia-s02-valido", "no figura como colaborador"),
     ("lab-ia-s02-sin-permisos", "Equipo registrado."),
     ("lab-ia-s02-inexistente", "El repositorio no existe"),
+    ("lab-ia-s02-sin-red", "Intenta más tarde"),
     ("lab-ia-s01-valido", "debe coincidir con la sección"),
     ("curso/lab-ia-s02-valido", "Usa el nombre corto"),
 ])
@@ -850,3 +858,38 @@ def test_teacher_scope_moving_team_and_historical_csv(client, grader_db, monkeyp
     csv_01 = client.get("/admin/export?section=01", headers=teacher).text
     assert next(csv.DictReader(io.StringIO(csv_01)))["section"] == "01"
     assert "actor=docente-01 acción=change_assignment recurso=1 estado=200" in grader_db.with_name("grader.log").read_text()
+
+def test_hidden_contents_404_keeps_receipt(client, grader_db):
+    token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    with closing(sqlite3.connect(grader_db)) as conn, conn:
+        conn.execute("UPDATE teams SET github_repository = 'equipo-2'")
+    result = submit(client, token, deliverable_id="D2", label="D2").json()["result"]
+    assert result["structuredContent"]["verification_status"] == "pendiente"
+
+
+def test_registration_global_limit_spans_client_ips(grader_db, monkeypatch):
+    monkeypatch.setenv("REGISTER_GLOBAL_LIMIT", "1")
+    app = create_server().streamable_http_app()
+    with TestClient(app, client=("192.0.2.1", 12345), base_url="http://localhost:8000") as first:
+        assert "X-Team-Token" in register(first, "Primero", [MEMBER]).headers
+        second = TestClient(app, client=("192.0.2.2", 12345), base_url="http://localhost:8000")
+        assert register(second, "Segundo", [MEMBER]).status_code == 429
+
+
+def test_scoped_window_reopening(client, grader_db, monkeypatch):
+    token = "synthetic-reopen-token"
+    monkeypatch.setenv("TEACHER_ADMIN_CREDENTIALS", json.dumps([
+        {"id": "docente-01", "section": "01", "sha256": hashlib.sha256(token.encode()).hexdigest()},
+    ]))
+    headers = {"Authorization": f"Bearer {token}"}
+    window = {"section": "02", "deliverable_id": "D1", "opens_at": "2000-01-01T00:00:00Z",
+              "closes_at": "2001-01-01T00:00:00Z"}
+    assert client.put("/admin/windows", json=window, headers=headers).status_code == 403
+    window["section"] = "01"
+    assert client.put("/admin/windows", json=window, headers=headers).status_code == 200
+    assert client.put("/admin/windows", json=window | {"closes_at": "2099-01-01T00:00:00Z"},
+                      headers=headers).status_code == 200
+    assert client.put("/admin/windows", json=window | {"closes_at": "1999-01-01T00:00:00Z"},
+                      headers=headers).status_code == 400
+    assert client.put("/admin/windows", json=window | {"closes_at": "2099-01-01"},
+                      headers=headers).status_code == 400

@@ -75,7 +75,9 @@ async def validate_repository(repository: str, section: str, users=()) -> list[s
         full_name = metadata.get("full_name")
         if not isinstance(full_name, str) or full_name.lower() != path.removeprefix("/repos/").lower():
             raise GitHubUnavailable("GitHub devolvió datos inesperados. Reintenta el registro.")
-        if metadata.get("private") is not True:
+        if not isinstance(metadata.get("private"), bool):
+            raise GitHubUnavailable("GitHub devolvió datos inesperados. Reintenta el registro.")
+        if not metadata["private"]:
             raise ValueError("El repositorio del equipo debe ser privado.")
         warnings = []
         for user in users:
@@ -102,12 +104,16 @@ def _sha(data: dict) -> str:
     return sha
 
 
-async def _check_visibility(client, path):
+async def _check_contents_access(client, path):
+    # Metadata remains visible to tokens that lack Contents permission.
+    response = await _request(client, f"{path}/git/matching-refs/tags")
+    if not response.is_success:
+        raise GitHubUnavailable("GitHub no permite confirmar el acceso al contenido. Avisa al docente.")
     try:
-        repo = await _get(client, path)
-    except GitHubNotFound:
-        raise GitHubUnavailable("GitHub no permite consultar el repositorio. Avisa al docente.") from None
-    if not isinstance(repo.get("full_name"), str):
+        refs = response.json()
+    except ValueError:
+        refs = None
+    if not isinstance(refs, list):
         raise GitHubUnavailable("GitHub devolvió datos inesperados. Intenta más tarde.")
 
 
@@ -115,7 +121,7 @@ async def resolve_tag(client, path: str, label: str, commit_hash: str) -> str:
     try:
         ref = await _get(client, f"{path}/git/ref/tags/{quote(label, safe='')}")
     except GitHubNotFound:
-        await _check_visibility(client, path)
+        await _check_contents_access(client, path)
         raise GitHubVerificationError("Etiqueta no encontrada. Publica la etiqueta en el repositorio asignado.") from None
     if ref.get("ref") != f"refs/tags/{label}":
         raise GitHubUnavailable("GitHub devolvió una referencia inesperada. Intenta más tarde.")
@@ -130,9 +136,9 @@ async def resolve_tag(client, path: str, label: str, commit_hash: str) -> str:
             try:
                 commit = await _get(client, f"{path}/commits/{commit_hash}")
             except GitHubNotFound:
-                await _check_visibility(client, path)
+                await _check_contents_access(client, path)
                 raise GitHubVerificationError("Commit inexistente. Publica el commit y comprueba su SHA.") from None
-            if _sha(commit) != sha:
+            if _sha(commit) != sha or not sha.startswith(commit_hash):
                 raise GitHubVerificationError("La etiqueta de GitHub apunta a otro commit. Usa el SHA al que apunta la etiqueta.")
             return sha
         if kind in ("tree", "blob"):
@@ -180,7 +186,7 @@ async def verified_ci_status(repository: str, sha: str) -> str:
         if "pending" in conclusions or (statuses and status == "pending"):
             return "pendiente"
         if conclusions <= {"success", "neutral", "skipped"} and (
-            (not statuses and "success" in conclusions) or status == "success"
+            (not statuses and "success" in conclusions) or (statuses and status == "success")
         ):
             return "exitoso"
     except GitHubVerificationError:

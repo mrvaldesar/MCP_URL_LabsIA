@@ -22,9 +22,10 @@ class JsonFormatter(logging.Formatter):
         message = record.getMessage()
         if record.exc_info:
             message += "\n" + self.formatException(record.exc_info)
-        admin_token = os.getenv("ADMIN_TOKEN")
-        if admin_token:
-            message = message.replace(admin_token, "[REDACTED]")
+        for key in ("ADMIN_TOKEN", "GITHUB_API_TOKEN"):
+            credential = os.getenv(key)
+            if credential:
+                message = message.replace(credential, "[REDACTED]")
         message = _SECRET_FIELD.sub(r"\1[REDACTED]", message)
         message = _CREDENTIAL.sub("[REDACTED]", message)
         return json.dumps({
