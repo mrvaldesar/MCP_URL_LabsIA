@@ -1,6 +1,8 @@
 import json
 import re
+import sqlite3
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -9,6 +11,7 @@ from pydantic import Field
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 
+from src import database
 from src.admin import ROUTES
 from src.audit import AuditMiddleware, audit_log, logger
 from src.auth import TeamAuthMiddleware
@@ -22,6 +25,15 @@ MAX_METRICS_BYTES = 64 * 1024
 TEAM_SIZES = {"individual": 1, "pareja": 2, "trio": 3}
 
 DeliverableId = Literal["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10"]
+
+
+async def health(request: Request):
+    try:
+        await run_in_threadpool(database.check_health)
+    except sqlite3.Error:
+        logger.exception("Falló el chequeo de SQLite")
+        return JSONResponse({"status": "unavailable"}, status_code=503)
+    return JSONResponse({"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()})
 
 
 class GraderMCP(FastMCP):
@@ -41,6 +53,7 @@ class GraderMCP(FastMCP):
                     yield
 
         app.router.lifespan_context = lifespan
+        app.router.routes.append(Route("/health", health, methods=["GET"]))
         app.router.routes.extend(ROUTES)
         app.add_middleware(TeamAuthMiddleware, path=self.settings.streamable_http_path)
         app.add_middleware(AuditMiddleware)

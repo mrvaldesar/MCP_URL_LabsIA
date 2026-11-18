@@ -169,8 +169,16 @@ def test_discovery_annotations_and_oauth_routes(client):
         assert client.get(path).status_code == 404
 
 
-def test_teacher_routes_health_and_audit(client, grader_db):
-    assert client.get("/health").json() == {"status": "ok"}
+def test_health_without_authentication(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload.keys() == {"status", "timestamp"}
+    assert payload["status"] == "ok"
+    assert datetime.fromisoformat(payload["timestamp"]).utcoffset() == timedelta(0)
+
+
+def test_teacher_routes_and_audit(client, grader_db):
     token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
     student = {"Authorization": f"Bearer {token}"}
     admin_token = "admin-test-credential"

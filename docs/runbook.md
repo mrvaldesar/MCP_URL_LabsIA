@@ -17,6 +17,14 @@ curl --fail --silent --show-error "$BASE_URL/health"
 
 Las rutas administrativas devuelven 403 si falta el token de administración o se usa una credencial de estudiante.
 
+## Configuración de Volúmenes en Producción
+
+SQLite guarda los equipos y las entregas en `data/grader.db`. Sin un volumen persistente, cada redespliegue que reemplace el contenedor borrará los equipos y las entregas registrados. Al arrancar, el servicio creará una base vacía.
+
+Con el `Dockerfile` del repositorio, monta el mismo disco persistente de Render o volumen de Railway en `/app/data` en cada despliegue. Monta el directorio completo para que SQLite pueda guardar `grader.db` y sus archivos auxiliares `grader.db-wal` y `grader.db-shm` en el mismo volumen. El usuario del servicio debe poder leer y escribir en el directorio. Mantén una sola réplica del servicio con este volumen.
+
+Si ya hay registros en el almacenamiento efímero, detén las escrituras y haz una copia con `sqlite3 .backup` antes del primer redespliegue. Restaura la copia en el volumen siguiendo el procedimiento de este runbook. Tras el despliegue, comprueba `/health` y exporta una sección conocida para verificar que se conservaron los registros.
+
 ## Rotar un token
 
 Confirma el ID del equipo en la exportación o en la base de datos. La rotación devuelve la nueva credencial en el encabezado HTTP `X-Team-Token` e invalida la anterior.
