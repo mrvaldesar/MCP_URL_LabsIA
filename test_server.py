@@ -1003,3 +1003,56 @@ def test_delivery_matrix_http(client, grader_db, section):
             assert receipt["verification_status"] == outcome
         else:
             assert result["isError"] and outcome in result["content"][0]["text"]
+
+
+def test_upgrade_from_003_preserves_legacy_receipt_and_team_token(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    original_migrations = database.MIGRATIONS_DIR
+    legacy_migrations = tmp_path / "legacy-migrations"
+    legacy_migrations.mkdir()
+    for file in sorted(original_migrations.glob("*.sql"))[:3]:
+        (legacy_migrations / file.name).write_bytes(file.read_bytes())
+    path = tmp_path / "legacy.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    monkeypatch.setattr(database, "MIGRATIONS_DIR", legacy_migrations)
+    monkeypatch.setenv("STRICT_ROSTER", "false")
+    database.init_db()
+    token = database.register_team_db("Equipo anterior", "01", "individual", [MEMBER], "lab-ia-s01-viejo")
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("""
+            INSERT INTO submissions (team_id, deliverable_id, label, commit_hash, declared_metrics_json,
+                declared_is_ci_passing, received_at_utc, attempt)
+            VALUES (1, 'D1', 'D1', 'abc1234', '{}', 1, '2026-01-01T00:00:00+00:00', 1)
+        """)
+    monkeypatch.setattr(database, "MIGRATIONS_DIR", Path(original_migrations))
+    database.init_db()
+    assert database.resolve_team_id(token) == 1
+    assert database.check_health()
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("""
+            SELECT id, commit_hash, verification_status, timing, received_section, received_team_name
+            FROM submissions
+        """).fetchall() == [(1, "abc1234", "sin_verificar", "sin_plazo", "01", "Equipo anterior")]
+
+
+def test_retry_inconsistency_and_scope(client, grader_db, monkeypatch):
+    token = register(client, "Pendiente", [MEMBER]).headers["X-Team-Token"]
+    assign_repository(grader_db)
+    result = submit(client, token, deliverable_id="D7", label="D7").json()["result"]
+    assert result["structuredContent"]["verification_status"] == "pendiente"
+    path = "/admin/submissions/1/retry-verification"
+    token_01 = "synthetic-section-01"
+    monkeypatch.setenv("TEACHER_ADMIN_CREDENTIALS", json.dumps([
+        {"id": "docente-01", "section": "01", "sha256": hashlib.sha256(token_01.encode()).hexdigest()},
+    ]))
+    assert client.post(path, headers={"Authorization": f"Bearer {token_01}"}).status_code == 404
+    admin = {"Authorization": "Bearer admin-test-credential"}
+    assert client.post(path, headers=admin).status_code == 202
+
+    async def mismatch(*args):
+        raise github.GitHubVerificationError("La etiqueta apunta a otro commit.")
+    monkeypatch.setattr(github, "verify_submission", mismatch)
+    assert client.post(path, headers=admin).json()["verification_status"] == "inconsistente"
+    with closing(sqlite3.connect(grader_db)) as conn:
+        assert conn.execute("SELECT attempt, verification_status FROM submissions").fetchall() == [(1, "inconsistente")]
