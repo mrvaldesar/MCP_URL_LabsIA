@@ -20,7 +20,7 @@ from src.admin import ROUTES
 from src.audit import AuditMiddleware, audit_log, logger
 from src.auth import TeamAuthMiddleware
 from src.database import Receipt, get_team_repository, init_db, register_team_db, save_submission_db
-from src.github import verify_submission
+from src.github import validate_repository, verify_submission
 from src.models import CARNET_PATTERN, Member, Modality, Section, validate_team_size
 
 COMMIT_PATTERN = r"^[0-9a-f]{7,40}$"
@@ -68,12 +68,13 @@ class GraderMCP(FastMCP):
         return app
 
 
-def register_team(
+async def register_team(
     team_name: str,
     section: Section,
     modality: Modality,
     members: Annotated[list[Member], Field(min_length=1, max_length=3)],
     ctx: Context,
+    github_repository: str | None = None,
 ) -> str:
     """Registra el equipo y confirma el registro.
 
@@ -95,8 +96,11 @@ def register_team(
             raise ValueError(f"Demasiados intentos de registro para un carné. Reintenta en {retry_after} segundos.")
 
     try:
-        request.state.issued_team_token = register_team_db(
-            team_name, section, modality, [member.model_dump() for member in members]
+        warnings = []
+        if github_repository is not None:
+            warnings = await validate_repository(github_repository, section, [m.github_user for m in members])
+        request.state.issued_team_token = await run_in_threadpool(
+            register_team_db, team_name, section, modality, [m.model_dump() for m in members], github_repository
         )
     except database.RosterMismatch as exc:
         for carnet in set(exc.carnets):
@@ -107,7 +111,7 @@ def register_team(
     except Exception:
         logger.exception("Falló el registro del equipo")
         raise ValueError("Error interno del servidor.") from None
-    return "Equipo registrado."
+    return " ".join(["Equipo registrado.", *warnings])
 
 
 def _reject_non_json_constant(value: str):

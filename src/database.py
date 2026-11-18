@@ -158,20 +158,22 @@ def _check_roster(conn: sqlite3.Connection, section: str, members: list[dict]) -
     return len(unmatched)
 
 
-def register_team_db(team_name: str, section: str, modality: Modality, members: list[dict]) -> str:
+def register_team_db(team_name: str, section: str, modality: Modality, members: list[dict], github_repository: str | None = None) -> str:
     token, salt, token_hash = _new_token()
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         unmatched = _check_roster(conn, section, members)
         try:
             conn.execute("""
-                INSERT INTO teams (team_name, token_hash, salt, section, modality, members, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO teams (team_name, token_hash, salt, section, modality, members, created_at, github_repository)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 team_name, token_hash, salt, section, modality,
-                json.dumps(members), datetime.now(timezone.utc).isoformat(),
+                json.dumps(members), datetime.now(timezone.utc).isoformat(), github_repository,
             ))
         except sqlite3.IntegrityError as exc:
+            if "UNIQUE constraint failed: teams.github_repository" in str(exc):
+                raise ValueError("El repositorio ya está asignado a otro equipo. Consulta al docente.") from None
             if "UNIQUE constraint failed: teams.team_name" in str(exc):
                 raise ValueError("El nombre del equipo ya está registrado.") from None
             raise

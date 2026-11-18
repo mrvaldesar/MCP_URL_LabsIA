@@ -35,12 +35,12 @@ def rpc(client, method, params=None, token=None):
     })
 
 
-def register(client, team_name, members, modality="individual", section="02"):
+def register(client, team_name, members, modality="individual", section="02", **extra):
     return rpc(client, "tools/call", {
         "name": "register_team",
         "arguments": {
             "team_name": team_name, "section": section, "modality": modality,
-            "members": members,
+            "members": members, **extra,
         },
     })
 
@@ -62,10 +62,22 @@ def github_api(monkeypatch):
         assert request.headers["Authorization"] == "Bearer github-test-credential"
         parts = request.url.path.split("/")
         assert parts[1:3] == ["repos", "curso"]
+        if parts[3].startswith("lab-ia-"):
+            if parts[3].endswith("inexistente"):
+                return httpx.Response(404)
+            if len(parts) == 4:
+                return httpx.Response(200, json={"full_name": "/".join(parts[2:4]), "private": True})
+            if parts[3].endswith("sin-permisos"):
+                return httpx.Response(403)
+            return httpx.Response(200 if len(parts) == 5 else 404)
         assert parts[3] in {f"equipo-{team_id}" for team_id in range(1, 21)}
         path = parts[4:]
+        if not path:
+            return httpx.Response(200, json={"full_name": "/".join(parts[2:4])})
         if path == ["commits", "abc1235"]:
             return httpx.Response(404)
+        if path == ["commits", "deadbee"]:
+            return httpx.Response(200, json={"sha": "deadbee" + "0" * 33})
         if path == ["commits", "abc1234"]:
             return httpx.Response(200, json={"sha": commit_sha})
         if path == ["git", "tags", tag_sha]:
@@ -422,9 +434,9 @@ def test_github_annotated_tag_saves_verified_sha(client, grader_db, github_api):
 
 
 @pytest.mark.parametrize(("label", "commit_hash", "message"), [
-    ("D2", "abc1234", "no existe"),
-    ("D5", "abc1235", "no existe"),
-    ("D3", "abc1234", "Falló la autenticación"),
+    ("D2", "abc1234", "Etiqueta no encontrada"),
+    ("D5", "abc1235", "Commit inexistente"),
+    ("D3", "abc1234", "Intenta más tarde"),
     ("D4", "abc1234", "Intenta más tarde"),
     ("D1", "deadbee", "apunta a otro commit"),
 ])
@@ -690,3 +702,34 @@ def test_proxy_trust_boundary():
     headers = [(b"x-forwarded-for", b"198.51.100.99, 192.0.2.11, 10.0.0.9")]
     assert client_ip({"client": ("10.0.0.8", 1), "headers": headers}, networks) == "192.0.2.11"
     assert client_ip({"client": ("192.0.2.12", 1), "headers": headers}, networks) == "192.0.2.12"
+
+
+@pytest.mark.parametrize(("repository", "expected"), [
+    ("lab-ia-s02-valido", "no figura como colaborador"),
+    ("lab-ia-s02-sin-permisos", "Equipo registrado."),
+    ("lab-ia-s02-inexistente", "El repositorio no existe"),
+    ("lab-ia-s01-valido", "debe coincidir con la sección"),
+    ("curso/lab-ia-s02-valido", "Usa el nombre corto"),
+])
+def test_repository_registration(client, grader_db, repository, expected):
+    response = register(client, "Equipo", [MEMBER], github_repository=repository)
+    assert expected in response.text
+    if "X-Team-Token" in response.headers:
+        assert database.get_team_repository(1) == repository
+        other = {"github_user": "otra-alumna", "carnet": "1234999"}
+        assert "ya está asignado" in register(client, "Otro", [other], github_repository=repository).text
+    else:
+        assert database.get_team_repository(1) is None
+
+
+@pytest.mark.skipif(__import__("os").getenv("RUN_GITHUB_INTEGRATION") != "1", reason="requiere red pública")
+def test_public_annotated_tag():
+    async def check():
+        async with github._client(public=True) as client:
+            path = "/repos/git/git"
+            ref = await github._get(client, path + "/git/ref/tags/v2.45.0")
+            assert ref["object"]["type"] == "tag"
+            tag = await github._get(client, path + "/git/tags/" + ref["object"]["sha"])
+            sha = tag["object"]["sha"]
+            assert await github.resolve_tag(client, path, "v2.45.0", sha[:12]) == sha
+    asyncio.run(check())
