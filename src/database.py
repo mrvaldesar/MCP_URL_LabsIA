@@ -227,11 +227,11 @@ def save_submission_db(
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         team = conn.execute(
-            "SELECT section, github_repository FROM teams WHERE id = ?", (team_id,)
+            "SELECT section, github_repository, team_name, modality, members FROM teams WHERE id = ?", (team_id,)
         ).fetchone()
         if team is None:
             raise ValueError("El equipo autenticado ya no existe.")
-        section, assigned_repository = team
+        section, assigned_repository, team_name, modality, members = team
         if assigned_repository != repository:
             raise ValueError("Cambió el repositorio asignado al equipo. Vuelve a intentar la entrega.")
         attempt = conn.execute("""
@@ -245,10 +245,12 @@ def save_submission_db(
             INSERT INTO submissions (
                 team_id, deliverable_id, label, commit_hash, declared_metrics_json,
                 declared_is_ci_passing, received_at_utc, attempt, github_repository, verification_status,
-                verified_ci_status, received_section, timing, late_minutes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                verified_ci_status, received_section, timing, late_minutes,
+                received_team_name, received_modality, received_members
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (team_id, deliverable_id, label, commit_hash, metrics_json, is_ci_passing, received_at, attempt,
-              repository, verification_status, verified_ci_status, section, timing, late_minutes))
+              repository, verification_status, verified_ci_status, section, timing, late_minutes,
+              team_name, modality, members))
         return Receipt(
             receipt_id=cursor.lastrowid,
             deliverable_id=deliverable_id,
@@ -265,11 +267,14 @@ def save_submission_db(
 
 
 def update_team(
-    team_id: int, members: list[dict] | None, modality: Modality | None
+    team_id: int, members: list[dict] | None, modality: Modality | None, section: str | None = None
 ) -> str | None:
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        team = conn.execute("SELECT modality, members FROM teams WHERE id = ?", (team_id,)).fetchone()
+        team = conn.execute(
+            "SELECT modality, members FROM teams WHERE id = ? AND (? IS NULL OR section = ?)",
+            (team_id, section, section),
+        ).fetchone()
         if team is None:
             return None
 
@@ -305,12 +310,12 @@ def update_team(
     return token
 
 
-def rotate_team_token(team_id: int) -> str | None:
+def rotate_team_token(team_id: int, section: str | None = None) -> str | None:
     token, salt, token_hash = _new_token()
     with _connect() as conn:
         updated = conn.execute("""
-            UPDATE teams SET token_hash = ?, salt = ? WHERE id = ?
-        """, (token_hash, salt, team_id))
+            UPDATE teams SET token_hash = ?, salt = ? WHERE id = ? AND (? IS NULL OR section = ?)
+        """, (token_hash, salt, team_id, section, section))
         return token if updated.rowcount == 1 else None
 
 
@@ -366,3 +371,32 @@ def set_delivery_window(section, deliverable_id, opens, closes):
             VALUES (?, ?, ?, ?) ON CONFLICT (section, deliverable_id) DO UPDATE SET
                 opens_at_utc = excluded.opens_at_utc, closes_at_utc = excluded.closes_at_utc
         """, (section, deliverable_id, opens, closes))
+
+def list_teams(section: str | None) -> list[dict]:
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT id, team_name, section, modality, members, github_repository, created_at
+            FROM teams WHERE (? IS NULL OR section = ?) ORDER BY id
+        """, (section, section))
+        return [dict(row) | {"members": json.loads(row["members"])} for row in rows]
+
+
+def team_assignment(team_id: int, section: str | None):
+    with _connect() as conn:
+        return conn.execute("""
+            SELECT section, github_repository FROM teams WHERE id = ? AND (? IS NULL OR section = ?)
+        """, (team_id, section, section)).fetchone()
+
+
+def change_assignment(team_id: int, previous: tuple, section: str, repository: str | None) -> bool:
+    with _connect() as conn:
+        try:
+            return conn.execute("""
+                UPDATE teams SET section = ?, github_repository = ?
+                WHERE id = ? AND section = ? AND github_repository IS ?
+            """, (section, repository, team_id, *previous)).rowcount == 1
+        except sqlite3.IntegrityError as exc:
+            if "teams.github_repository" not in str(exc):
+                raise
+            raise ValueError("El repositorio ya está asignado a otro equipo. Consulta al docente.") from None

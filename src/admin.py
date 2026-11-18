@@ -1,4 +1,6 @@
+import hashlib
 import hmac
+import json
 import io
 import os
 import sqlite3
@@ -11,14 +13,33 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from src import database
+from src import database, github
 from src.audit import logger
 from src.auth import MAX_REQUEST_BYTES, TOKEN_PATTERN
 from src.export import export_section
-from src import github
 from src.models import DeliverableId, Member, Modality, Section
 
 NO_STORE = {"Cache-Control": "no-store"}
+
+
+class TeacherCredential(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^[a-zA-Z0-9_.-]{1,64}$")
+    section: Section | None = None
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+def teacher_credentials() -> list[TeacherCredential]:
+    entries = json.loads(os.getenv("TEACHER_ADMIN_CREDENTIALS", "[]"))
+    if not isinstance(entries, list):
+        raise ValueError("Se esperaba una lista de credenciales.")
+    credentials = [TeacherCredential.model_validate(entry) for entry in entries]
+    if (len({entry.id for entry in credentials}) != len(credentials)
+            or len({entry.sha256 for entry in credentials}) != len(credentials)
+            or any(entry.id == "superadmin" for entry in credentials)):
+        raise ValueError("Los docentes deben tener identificadores y credenciales únicos.")
+    return credentials
 
 
 def admin_only(endpoint):
@@ -26,17 +47,38 @@ def admin_only(endpoint):
     async def protected(request: Request):
         expected = os.getenv("ADMIN_TOKEN")
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
-        valid = (
-            bool(expected)
-            and scheme.lower() == "bearer"
-            and hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
-        )
-        if valid and TOKEN_PATTERN.fullmatch(token):
-            valid = await run_in_threadpool(database.resolve_team_id, token) is None
-        if not valid:
+        identity = None
+        section = None
+        if scheme.lower() == "bearer" and token:
+            digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            if expected and hmac.compare_digest(digest, hashlib.sha256(expected.encode("utf-8")).hexdigest()):
+                identity = "superadmin"
+            else:
+                try:
+                    for teacher in teacher_credentials():
+                        if hmac.compare_digest(digest, teacher.sha256):
+                            identity, section = teacher.id, teacher.section
+                except ValueError:
+                    logger.error("TEACHER_ADMIN_CREDENTIALS tiene formato inválido.")
+        if identity and TOKEN_PATTERN.fullmatch(token) and await run_in_threadpool(database.resolve_team_id, token):
+            identity = None
+        if identity is None:
             return JSONResponse({"error": "Acceso administrativo denegado."}, status_code=403)
-        return await endpoint(request)
+        request.state.admin_section = section
+        response = await endpoint(request)
+        resource = getattr(request.state, "audit_resource", request.path_params.get("id", "-"))
+        logger.info("Administración actor=%s acción=%s recurso=%s estado=%d",
+                    identity, endpoint.__name__, resource, response.status_code)
+        return response
     return protected
+
+
+def section_denied(request: Request, section: str) -> bool:
+    return request.state.admin_section not in (None, section)
+
+
+def forbidden():
+    return JSONResponse({"error": "Tu credencial administrativa no tiene acceso a esa sección."}, status_code=403)
 
 
 @admin_only
@@ -44,7 +86,7 @@ async def rotate_token(request: Request):
     team_id = request.path_params["id"]
     if not 0 < team_id <= 2**63 - 1:
         return JSONResponse({"error": "Equipo no encontrado."}, status_code=404)
-    token = await run_in_threadpool(database.rotate_team_token, team_id)
+    token = await run_in_threadpool(database.rotate_team_token, team_id, request.state.admin_section)
     if token is None:
         return JSONResponse({"error": "Equipo no encontrado."}, status_code=404)
     logger.info("Credencial rotada para equipo id=%d", team_id)
@@ -56,6 +98,9 @@ async def download_export(request: Request):
     section = request.query_params.get("section")
     if section not in ("01", "02"):
         return JSONResponse({"error": "La sección debe ser 01 o 02."}, status_code=400)
+    request.state.audit_resource = section
+    if section_denied(request, section):
+        return forbidden()
     output = io.StringIO(newline="")
     await run_in_threadpool(export_section, section, output)
     return Response(output.getvalue(), media_type="text/csv", headers={
@@ -103,7 +148,7 @@ async def update_team(request: Request):
 
     members = [member.model_dump() for member in update.members] if update.members is not None else None
     try:
-        token = await run_in_threadpool(database.update_team, team_id, members, update.modality)
+        token = await run_in_threadpool(database.update_team, team_id, members, update.modality, request.state.admin_section)
     except database.MemberIdentityConflict as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
     except ValueError as exc:
@@ -123,6 +168,9 @@ async def upload_roster(request: Request):
         roster = Roster.model_validate_json(body)
     except ValidationError:
         return JSONResponse({"error": "Padrón inválido. Revisa la sección y los integrantes."}, status_code=400)
+    request.state.audit_resource = roster.section
+    if section_denied(request, roster.section):
+        return forbidden()
     members = [(member.github_user, member.carnet) for member in roster.members]
     try:
         await run_in_threadpool(database.replace_roster, roster.section, members)
@@ -142,7 +190,7 @@ async def retry_verification(request: Request):
     receipt_id = request.path_params["id"]
     pending = None
     if 0 < receipt_id <= 2**63 - 1:
-        pending = await run_in_threadpool(database.pending_submission, receipt_id, None)
+        pending = await run_in_threadpool(database.pending_submission, receipt_id, request.state.admin_section)
     if pending is None:
         return JSONResponse({"error": "Recibo pendiente no encontrado."}, status_code=404)
     repository, label, sha = pending
@@ -156,7 +204,8 @@ async def retry_verification(request: Request):
     else:
         status = "verificado"
         ci = await github.verified_ci_status(repository, sha)
-    updated = await run_in_threadpool(database.finish_verification, receipt_id, sha, status, ci, None)
+    updated = await run_in_threadpool(database.finish_verification, receipt_id, sha, status, ci,
+                                      request.state.admin_section)
     if not updated:
         return JSONResponse({"error": "El recibo cambió. Consulta el CSV."}, status_code=409)
     logger.info("Verificación reintentada recibo=%d estado=%s", receipt_id, status)
@@ -181,6 +230,9 @@ async def set_window(request: Request):
         window = DeliveryWindow.model_validate_json(body)
     except ValidationError:
         return JSONResponse({"error": "Indica sección, entregable y fechas ISO 8601 con zona horaria."}, status_code=400)
+    request.state.audit_resource = f"{window.section}/{window.deliverable_id}"
+    if section_denied(request, window.section):
+        return forbidden()
     if window.opens_at >= window.closes_at:
         return JSONResponse({"error": "El cierre debe ser posterior a la apertura."}, status_code=400)
     opens, closes = (value.astimezone(timezone.utc).isoformat(timespec="microseconds")
@@ -191,7 +243,62 @@ async def set_window(request: Request):
                          "opens_at_utc": opens, "closes_at_utc": closes})
 
 
+@admin_only
+async def list_teams(request: Request):
+    section = request.query_params.get("section", request.state.admin_section)
+    if section not in (None, "01", "02"):
+        return JSONResponse({"error": "La sección debe ser 01 o 02."}, status_code=400)
+    request.state.audit_resource = section or "todas"
+    if section is not None and section_denied(request, section):
+        return forbidden()
+    teams = await run_in_threadpool(database.list_teams, section)
+    return JSONResponse({"teams": teams}, headers=NO_STORE)
+
+
+class AssignmentUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    section: Section | None = None
+    github_repository: str | None = None
+
+
+@admin_only
+async def change_assignment(request: Request):
+    team_id = request.path_params["id"]
+    assignment = None
+    if 0 < team_id <= 2**63 - 1:
+        assignment = await run_in_threadpool(database.team_assignment, team_id, request.state.admin_section)
+    if assignment is None:
+        return JSONResponse({"error": "Equipo no encontrado."}, status_code=404)
+    body = await read_admin_body(request)
+    if body is None:
+        return JSONResponse({"error": "La solicitud supera 1 MiB."}, status_code=413)
+    try:
+        update = AssignmentUpdate.model_validate_json(body)
+    except ValidationError:
+        return JSONResponse({"error": "Indica section (01 o 02) o github_repository (nombre corto)."}, status_code=400)
+    if update.section is None and update.github_repository is None:
+        return JSONResponse({"error": "Indica la sección de destino o el repositorio corregido."}, status_code=400)
+    section = update.section or assignment[0]
+    if section_denied(request, section):
+        return forbidden()
+    repository = update.github_repository if update.github_repository is not None else assignment[1]
+    try:
+        if repository is not None and (update.github_repository is not None or section != assignment[0]):
+            await github.validate_repository(repository, section)
+        changed = await run_in_threadpool(database.change_assignment, team_id, assignment, section, repository)
+    except github.GitHubUnavailable as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if not changed:
+        return JSONResponse({"error": "El equipo cambió. Actualiza la lista y reintenta."}, status_code=409)
+    return JSONResponse({"team_id": team_id, "section": section, "github_repository": repository})
+
+
 ROUTES = [
+    Route("/admin/teams", list_teams, methods=["GET"]),
+    Route("/admin/teams/{id:int}/assignment", change_assignment, methods=["PATCH"]),
     Route("/admin/windows", set_window, methods=["PUT"]),
     Route("/admin/github/health", github_health, methods=["GET"]),
     Route("/admin/submissions/{id:int}/retry-verification", retry_verification, methods=["POST"]),

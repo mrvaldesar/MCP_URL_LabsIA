@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import sqlite3
@@ -300,14 +301,14 @@ def test_sql_migrations_run_once(grader_db):
         assert conn.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall() == [
             ("001_initial_schema.sql",), ("002_teacher_operations.sql",),
             ("003_team_github_repository.sql",), ("004_github_verification.sql",),
-            ("005_delivery_windows.sql",),
+            ("005_delivery_windows.sql",), ("006_submission_team_snapshot.sql",),
         ]
 
 
 def test_unexpected_admin_error_is_generic_and_log_redacts_secrets(client, grader_db, monkeypatch):
     token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
 
-    def fail(team_id):
+    def fail(team_id, section):
         raise RuntimeError(f'database failure Authorization: Bearer {token}, team_token="extra-secret"')
 
     monkeypatch.setattr(database, "rotate_team_token", fail)
@@ -822,3 +823,30 @@ def test_delivery_windows_and_csv(client, grader_db, opens, closes, expected):
     row = next(rows)
     assert row["timing"] == expected and int(row["late_minutes"]) == receipt["late_minutes"]
     assert (row["declared_is_ci_passing"], row["verified_ci_status"]) == ("1", "exitoso")
+
+def test_teacher_scope_moving_team_and_historical_csv(client, grader_db, monkeypatch):
+    teacher_token = "synthetic-teacher-token"
+    monkeypatch.setenv("TEACHER_ADMIN_CREDENTIALS", json.dumps([
+        {"id": "docente-01", "section": "01", "sha256": hashlib.sha256(teacher_token.encode()).hexdigest()},
+    ]))
+    teacher = {"Authorization": f"Bearer {teacher_token}"}
+    admin = {"Authorization": "Bearer admin-test-credential"}
+    first = register(client, "Uno", [MEMBER], section="01")
+    register(client, "Dos", [{"github_user": "alumna-dos", "carnet": "0000002"}])
+    assign_repository(grader_db)
+    assert submit(client, first.headers["X-Team-Token"]).json()["result"]["structuredContent"]["section"] == "01"
+    assert [team["id"] for team in client.get("/admin/teams", headers=teacher).json()["teams"]] == [1]
+    assert client.get("/admin/teams?section=02", headers=teacher).status_code == 403
+    assert client.get("/admin/export?section=02", headers=teacher).status_code == 403
+    assert client.post("/admin/roster", headers=teacher, json={"section": "02", "members": []}).status_code == 403
+    assert client.post("/admin/teams/2/rotate-token", headers=teacher).status_code == 404
+    assert client.post("/admin/teams/2/update", headers=teacher, json={"modality": "individual"}).status_code == 404
+    assert client.patch("/admin/teams/2/assignment", headers=teacher, json={"section": "01"}).status_code == 404
+    path = "/admin/teams/1/assignment"
+    assert client.patch(path, headers=teacher, json={"section": "02"}).status_code == 403
+    assert client.patch(path, headers=teacher, json={"github_repository": "lab-ia-s01-uno"}).status_code == 200
+    assert client.patch(path, headers=admin, json={"section": "02", "github_repository": "lab-ia-s02-uno"}).status_code == 200
+    assert client.get("/admin/teams", headers=teacher).json()["teams"] == []
+    csv_01 = client.get("/admin/export?section=01", headers=teacher).text
+    assert next(csv.DictReader(io.StringIO(csv_01)))["section"] == "01"
+    assert "actor=docente-01 acción=change_assignment recurso=1 estado=200" in grader_db.with_name("grader.log").read_text()
