@@ -155,6 +155,12 @@ def resolve_team_id(token: str) -> int | None:
         return None
 
 
+def get_team_repository(team_id: int) -> str | None:
+    with _connect() as conn:
+        team = conn.execute("SELECT github_repository FROM teams WHERE id = ?", (team_id,)).fetchone()
+        return team[0] if team else None
+
+
 def save_submission_db(
     team_id: int,
     deliverable_id: str,
@@ -162,13 +168,18 @@ def save_submission_db(
     commit_hash: str,
     metrics_json: str,
     is_ci_passing: bool,
+    repository: str,
 ) -> Receipt:
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        team = conn.execute("SELECT section FROM teams WHERE id = ?", (team_id,)).fetchone()
+        team = conn.execute(
+            "SELECT section, github_repository FROM teams WHERE id = ?", (team_id,)
+        ).fetchone()
         if team is None:
             raise ValueError("El equipo autenticado ya no existe.")
-        section = team[0]
+        section, assigned_repository = team
+        if assigned_repository != repository:
+            raise ValueError("Cambió el repositorio asignado al equipo. Vuelve a intentar la entrega.")
         attempt = conn.execute("""
             SELECT COALESCE(MAX(attempt), 0) + 1 FROM submissions
             WHERE team_id = ? AND deliverable_id = ?

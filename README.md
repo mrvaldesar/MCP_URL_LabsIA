@@ -33,13 +33,40 @@ python -m src.server
 
 El servidor estará escuchando en http://localhost:8000 (o el dominio configurado). El archivo de base de datos se creará automáticamente en `data/grader.db`.
 
+### Verificación de entregas en GitHub
+
+Configura `GITHUB_COURSE_ORG` con el nombre de la organización del curso y
+`GITHUB_API_TOKEN` con un token del servidor que tenga acceso de lectura a
+**Contents** en los repositorios de los equipos. Carga el token desde el gestor
+de secretos. En Docker, pasa ambas variables con
+`-e GITHUB_COURSE_ORG -e GITHUB_API_TOKEN`.
+
+Después del registro, el operador asigna a cada equipo su repositorio en la
+base de datos persistente. Guarda solo el nombre del repositorio dentro de la
+organización configurada. Por ejemplo, para asignar `equipo-42` al equipo con
+ID `42` después de que el servidor aplique las migraciones:
+
+```bash
+sqlite3 -bail data/grader.db <<'SQL'
+SELECT id, team_name, section, github_repository FROM teams ORDER BY id;
+SQL
+
+sqlite3 -bail data/grader.db <<'SQL'
+UPDATE teams SET github_repository = 'equipo-42' WHERE id = 42;
+SELECT id, github_repository FROM teams WHERE id = 42;
+SQL
+```
+
+Cada repositorio puede pertenecer a un solo equipo. Los equipos existentes
+también requieren una asignación antes de enviar nuevas entregas.
+
 ## 🤖 Uso para los estudiantes
 
 Configura el cliente MCP para conectarse a `/mcp` mediante Streamable HTTP. La inicialización y el listado de herramientas están disponibles sin token.
 
 1. Llama a `register_team(team_name, section, modality, members)`. Usa la sección `01` o `02` y proporciona uno, dos o tres integrantes según la modalidad `individual`, `pareja` o `trio`. Cada integrante requiere `github_user` y un `carnet` de siete dígitos.
 2. El registro devuelve una confirmación MCP y entrega el token una sola vez en el encabezado de respuesta `X-Team-Token`. Usa un cliente que permita leer los encabezados HTTP, como `curl -i`, para recogerlo. Configura el cliente MCP para enviarlo en `Authorization: Bearer <token>`. El agente no lee ni escribe archivos `.env`.
-3. Llama a `submit_lab_results(deliverable_id, label, commit_hash, metrics_json, is_ci_passing)`. El identificador va de `D1` a `D10`, el commit usa entre 7 y 40 dígitos hexadecimales en minúscula y las métricas se envían como una cadena JSON válida de hasta 64 KiB en UTF-8.
+3. Llama a `submit_lab_results(deliverable_id, label, commit_hash, metrics_json, is_ci_passing)`. El identificador va de `D1` a `D10`, el commit usa entre 7 y 40 dígitos hexadecimales en minúscula y las métricas se envían como una cadena JSON válida de hasta 64 KiB en UTF-8. Publica en el repositorio asignado la etiqueta Git indicada en `label` (por ejemplo, `D1`) antes de enviar. GitHub debe resolver el hash declarado al mismo commit al que apunta la etiqueta. Las métricas y el estado de CI siguen siendo declaraciones del equipo.
 
 El recibo incluye `receipt_id`, `deliverable_id`, `label`, `received_at_utc`, `status`, `attempt` y `section`. Las métricas y el estado de CI son declaraciones del equipo. El estado `received` confirma la recepción.
 
