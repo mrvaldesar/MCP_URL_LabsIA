@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import Field, ValidationError
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
@@ -41,7 +42,40 @@ async def health(request: Request):
     return JSONResponse({"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()})
 
 
+VALIDATION_HINTS = {
+    "deliverable_id": "Usa un entregable de D1 a D10, en mayúsculas.",
+    "label": "Usa una etiqueta de texto igual al entregable u omite label.",
+    "commit_hash": "Usa entre 7 y 40 dígitos hexadecimales en minúscula.",
+    "metrics_json": "Envía una cadena con JSON válido de hasta 64 KiB en UTF-8.",
+    "is_ci_passing": "Indica true o false.",
+    "section": "Usa la sección 01 o 02 como texto.",
+    "modality": "Usa individual, pareja o trio.",
+    "team_name": "Indica el nombre del equipo como texto.",
+    "members": "Envía una lista de uno a tres integrantes con github_user y carnet.",
+    "github_user": "Usa el usuario GitHub sin @, con hasta 39 caracteres, letras ASCII, números y guiones simples.",
+    "carnet": "Usa el formato de carné del curso como texto y conserva los ceros iniciales.",
+    "github_repository": "Usa el nombre corto del repositorio como texto.",
+}
+
+
 class GraderMCP(FastMCP):
+    async def call_tool(self, name, arguments):
+        try:
+            return await super().call_tool(name, arguments)
+        except ToolError as exc:
+            cause = exc.__cause__
+            if not isinstance(cause, ValidationError):
+                raise
+            messages = []
+            for error in cause.errors(include_input=False, include_context=False, include_url=False):
+                field = next((part for part in reversed(error["loc"]) if part in VALIDATION_HINTS), None)
+                hint = VALIDATION_HINTS.get(field, "Revisa los campos según tools/list.")
+                message = f"{field}: {hint}" if field else hint
+                if message not in messages:
+                    messages.append(message)
+            raise ToolError(" ".join(messages)) from None
+
+
     def streamable_http_app(self) -> Starlette:
         app = super().streamable_http_app()
         transport_lifespan = app.router.lifespan_context
@@ -120,7 +154,6 @@ def _reject_non_json_constant(value: str):
 
 async def submit_lab_results(
     deliverable_id: DeliverableId,
-    label: Annotated[str, Field(description="Etiqueta de GitHub que debe coincidir exactamente con deliverable_id.")],
     commit_hash: Annotated[str, Field(pattern=COMMIT_PATTERN)],
     metrics_json: Annotated[
         str,
@@ -132,6 +165,7 @@ async def submit_lab_results(
     ],
     is_ci_passing: Annotated[bool, Field(description="Estado de CI declarado por el equipo.")],
     ctx: Context,
+    label: Annotated[str | None, Field(description="Etiqueta de GitHub. Por defecto usa deliverable_id.")] = None,
 ) -> Receipt:
     """Registra métricas y estado de CI declarados y retorna un recibo.
 
@@ -143,7 +177,9 @@ async def submit_lab_results(
     if team_id is None:
         raise ValueError("Se requiere un equipo autenticado.")
 
-    if not re.fullmatch(re.escape(deliverable_id), label):
+    if label is None:
+        label = deliverable_id
+    if label != deliverable_id:
         raise ValueError(f"label debe coincidir exactamente con deliverable_id ({deliverable_id}).")
     if len(metrics_json.encode("utf-8")) > MAX_METRICS_BYTES:
         raise ValueError(f"metrics_json supera {MAX_METRICS_BYTES} bytes.")

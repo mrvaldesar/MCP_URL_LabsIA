@@ -775,3 +775,28 @@ def test_admin_retry_and_credential_health(client, grader_db, monkeypatch):
     assert result.json() == {"receipt_id": 1, "verification_status": "verificado", "verified_ci_status": "exitoso"}
     assert client.post(path, headers=headers).status_code == 404
     assert client.get("/admin/github/health", headers=headers).json() == {"github_credential_status": "valida"}
+
+@pytest.mark.parametrize(("bad", "hint"), [
+    ({"deliverable_id": "D11"}, "Usa un entregable"),
+    ({"commit_hash": "???secret-marker"}, "dígitos hexadecimales"),
+    ({"metrics_json": 7}, "JSON válido"),
+    ({"label": 7}, "etiqueta de texto"),
+    ({"is_ci_passing": {}}, "true o false"),
+])
+def test_actionable_submission_validation(client, grader_db, bad, hint):
+    token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    response = submit(client, token, **bad).json()["result"]
+    assert response["isError"]
+    message = response["content"][0]["text"]
+    assert hint in message
+    assert "secret-marker" not in message
+    assert "literal_error" not in message and "string_pattern_mismatch" not in message
+
+
+def test_omitted_label_defaults_to_deliverable(client, grader_db):
+    token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    assign_repository(grader_db)
+    response = rpc(client, "tools/call", {"name": "submit_lab_results", "arguments": {
+        "deliverable_id": "D1", "commit_hash": "abc1234", "metrics_json": "{}", "is_ci_passing": True,
+    }}, token=token)
+    assert response.json()["result"]["structuredContent"]["label"] == "D1"
