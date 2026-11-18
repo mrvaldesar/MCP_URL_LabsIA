@@ -102,6 +102,8 @@ def github_api(monkeypatch):
         label = "/".join(path[3:])
         if label == "D2":
             return httpx.Response(404)
+        if label == "D3" and parts[3] == "equipo-3":
+            return httpx.Response(403, json={"message": "Resource not accessible by integration"})
         if label == "D3":
             return httpx.Response(401)
         if label == "D4":
@@ -1112,3 +1114,59 @@ def test_periodic_retries_stop_at_limit_and_report_aged_receipts(grader_db, gith
             "pendiente", "desconocido", "2",
         )
         assert database.pending_verification_ids(2) == []
+
+
+@pytest.mark.parametrize(("repository_id", "deliverable", "alert"), [
+    (1, "D3", 401), (3, "D3", 403), (1, "D4", None),
+])
+def test_github_credentials_alert_and_keep_receipts(client, grader_db, repository_id, deliverable, alert):
+    token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    with closing(sqlite3.connect(grader_db)) as conn, conn:
+        conn.execute("UPDATE teams SET github_repository = ?", (f"equipo-{repository_id}",))
+    receipt = submit(client, token, deliverable_id=deliverable, label=deliverable).json()["result"]["structuredContent"]
+    assert receipt["verification_status"] == "pendiente"
+    log = grader_db.with_name("grader.log").read_text()
+    if alert is None:
+        assert "Credencial de GitHub inválida" not in log
+    else:
+        assert f"Credencial de GitHub inválida o con permisos insuficientes estado={alert}" in log
+
+
+def test_github_app_signs_and_reuses_installation_token(tmp_path, monkeypatch):
+    import jwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    path = tmp_path / "app.pem"
+    path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                       serialization.NoEncryption()))
+    monkeypatch.setenv("GITHUB_COURSE_ORG", "curso")
+    monkeypatch.setenv("GITHUB_APP_ID", "123")
+    monkeypatch.setenv("GITHUB_APP_INSTALLATION_ID", "456")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_PATH", str(path))
+    monkeypatch.setenv("GITHUB_API_TOKEN", "synthetic-unused-pat")
+    monkeypatch.setattr(github, "_installation_token", None)
+    requests = []
+
+    def handle(request):
+        requests.append(request.url.path)
+        bearer = request.headers["authorization"].removeprefix("Bearer ")
+        if request.method == "POST":
+            assert request.url.path == "/app/installations/456/access_tokens"
+            assert jwt.decode(bearer, key.public_key(), algorithms=["RS256"])["iss"] == "123"
+            return httpx.Response(201, json={"token": "synthetic-installation-token", "expires_at": "2099-01-01T00:00:00Z"})
+        assert bearer == "synthetic-installation-token"
+        return httpx.Response(200, json={"repositories": [{"full_name": "curso/lab-ia-s01-piloto", "private": True}]})
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(github.httpx, "AsyncClient", lambda **kwargs: client_class(
+        transport=httpx.MockTransport(handle), **kwargs,
+    ))
+
+    async def check():
+        assert await github.credential_status() == "valida"
+        assert await github.credential_status() == "valida"
+
+    asyncio.run(check())
+    assert requests == ["/app/installations/456/access_tokens", "/installation/repositories", "/installation/repositories"]

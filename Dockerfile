@@ -8,7 +8,7 @@ RUN --mount=type=secret,id=pip_cert \
     if [ -f /run/secrets/pip_cert ]; then export PIP_CERT=/run/secrets/pip_cert; fi \
     && python -m venv /opt/venv \
     && /opt/venv/bin/python -m pip install --no-cache-dir -c requirements.txt \
-        mcp pydantic starlette uvicorn httpx
+        mcp pydantic starlette uvicorn httpx "PyJWT[crypto]"
 
 FROM base AS runtime
 

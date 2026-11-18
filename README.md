@@ -106,7 +106,7 @@ Para actualizar un equipo, envía `members` con la lista completa de integrantes
 | `TRUSTED_PROXY_CIDRS` | Vacío | Redes de proxies autorizados a proporcionar `X-Forwarded-For`, separadas por comas. |
 | `TEACHER_ADMIN_CREDENTIALS` | `[]` | Lista JSON de docentes con identificador, sección y SHA-256 de su token. |
 | `GITHUB_COURSE_ORG` | Vacío | Organización única del curso. |
-| `GITHUB_API_TOKEN` | Vacío | Credencial del servidor para repositorios privados, almacenada en el gestor de secretos. |
+| `GITHUB_API_TOKEN` | Vacío | Token de grano fino alternativo. Se prefiere una GitHub App con los tres campos del runbook. |
 | `ADMIN_TOKEN` | Sin configurar | Credencial de superadministración. |
 | `GRADER_LOG_PATH` | `grader.log` local, `/app/data/grader.log` en Docker | Ruta del log de auditoría. |
 

@@ -197,11 +197,11 @@ async def submit_lab_results(
             raise ValueError("El equipo no tiene un repositorio de GitHub asignado. Avisa al docente.")
         try:
             verified_sha = await verify_submission(repository, label, commit_hash)
+            ci = await verified_ci_status(repository, verified_sha)
         except GitHubUnavailable:
             verified_sha, verification, ci = commit_hash, "pendiente", "desconocido"
         else:
             verification = "verificado"
-            ci = await verified_ci_status(repository, verified_sha)
         return await run_in_threadpool(
             save_submission_db, team_id, deliverable_id, label, verified_sha, metrics_json, is_ci_passing, repository, verification, ci, received_at
         )

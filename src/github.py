@@ -1,8 +1,15 @@
+import asyncio
 import os
 import re
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
+import jwt
+
+from src.audit import logger
 
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 ORG_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
@@ -22,17 +29,99 @@ class GitHubNotFound(GitHubVerificationError):
     pass
 
 
-def _client(*, public=False):
-    token = "" if public else os.getenv("GITHUB_API_TOKEN", "")
-    headers = {"Accept": "application/vnd.github+json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return httpx.AsyncClient(base_url="https://api.github.com", headers=headers, timeout=5.0)
+class GitHubCredentialError(GitHubUnavailable):
+    pass
+
+
+APP_ENV = ("GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH")
+_token_lock = asyncio.Lock()
+_installation_token = None
+
+
+def _app_config():
+    return tuple(os.getenv(key, "") for key in APP_ENV)
+
+
+def _credential_error(status):
+    logger.warning("Credencial de GitHub inválida o con permisos insuficientes estado=%s", status)
+    raise GitHubCredentialError("La credencial de GitHub requiere revisión del docente.")
+
+
+def _check_credential(response: httpx.Response):
+    if response.status_code == 401:
+        _credential_error(401)
+    if response.status_code == 403:
+        if response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers:
+            return
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        message = str(payload.get("message", "")).lower() if isinstance(payload, dict) else ""
+        if "rate limit" not in message and "abuse detection" not in message:
+            _credential_error(403)
+
+
+async def _app_token(client, config):
+    global _installation_token
+    app_id, installation_id, key_path = config
+    if not re.fullmatch(r"[0-9]+", app_id) or not re.fullmatch(r"[0-9]+", installation_id) or not key_path:
+        _credential_error("configuración_app")
+    async with _token_lock:
+        now = datetime.now(timezone.utc).timestamp()
+        if _installation_token:
+            cached_config, token, expiry = _installation_token
+            if cached_config == config and expiry > now + 60:
+                return token
+        try:
+            assertion = jwt.encode({"iss": app_id, "iat": int(now) - 60, "exp": int(now) + 540},
+                                   Path(key_path).read_bytes(), algorithm="RS256")
+        except (OSError, ValueError, jwt.PyJWTError):
+            _credential_error("clave_app")
+        try:
+            response = await client.post(f"/app/installations/{installation_id}/access_tokens",
+                                         headers={"Authorization": f"Bearer {assertion}"})
+        except httpx.RequestError:
+            raise GitHubUnavailable("GitHub no está disponible. Intenta más tarde.") from None
+        _check_credential(response)
+        if response.status_code == 404:
+            _credential_error("instalación_app")
+        if response.status_code != 201:
+            raise GitHubUnavailable("GitHub no pudo emitir el token de instalación. Intenta más tarde.")
+        try:
+            payload = response.json()
+            token = payload["token"]
+            expires = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+            if not isinstance(token, str) or not token or expires.tzinfo is None or expires.timestamp() <= now:
+                raise ValueError
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise GitHubUnavailable("GitHub devolvió un token de instalación inválido. Avisa al docente.") from None
+        _installation_token = (config, token, expires.timestamp())
+        return token
+
+
+@asynccontextmanager
+async def _client(*, public=False):
+    global _installation_token
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    async with httpx.AsyncClient(base_url="https://api.github.com", headers=headers, timeout=5.0) as client:
+        config = _app_config()
+        token = ""
+        if not public:
+            token = await _app_token(client, config) if any(config) else os.getenv("GITHUB_API_TOKEN", "")
+        if token:
+            client.headers["Authorization"] = f"Bearer {token}"
+        try:
+            yield client
+        except GitHubCredentialError:
+            if _installation_token and _installation_token[1] == token:
+                _installation_token = None
+            raise
 
 
 def _repo_path(repository: str) -> str:
     organization = os.getenv("GITHUB_COURSE_ORG", "")
-    if not os.getenv("GITHUB_API_TOKEN") or not ORG_PATTERN.fullmatch(organization):
+    if not (os.getenv("GITHUB_API_TOKEN") or any(_app_config())) or not ORG_PATTERN.fullmatch(organization):
         raise GitHubUnavailable("La verificación de GitHub requiere configuración del servidor. Avisa al docente.")
     if not REPO_PATTERN.fullmatch(repository) or repository in (".", ".."):
         raise GitHubVerificationError("El repositorio asignado al equipo es inválido. Avisa al docente.")
@@ -48,6 +137,7 @@ async def _request(client: httpx.AsyncClient, path: str) -> httpx.Response:
 
 async def _get(client: httpx.AsyncClient, path: str) -> dict:
     response = await _request(client, path)
+    _check_credential(response)
     if response.status_code == 404:
         raise GitHubNotFound()
     if response.is_success:
@@ -107,6 +197,7 @@ def _sha(data: dict) -> str:
 async def _check_contents_access(client, path):
     # Metadata remains visible to tokens that lack Contents permission.
     response = await _request(client, f"{path}/git/matching-refs/tags")
+    _check_credential(response)
     if not response.is_success:
         raise GitHubUnavailable("GitHub no permite confirmar el acceso al contenido. Avisa al docente.")
     try:
@@ -189,6 +280,8 @@ async def verified_ci_status(repository: str, sha: str) -> str:
             (not statuses and "success" in conclusions) or (statuses and status == "success")
         ):
             return "exitoso"
+    except GitHubCredentialError:
+        raise
     except GitHubVerificationError:
         pass
     return "desconocido"
@@ -200,18 +293,25 @@ async def credential_status() -> str:
     except GitHubUnavailable:
         return "sin_configurar"
     organization = path.split("/")[2]
+    app = any(_app_config())
     try:
         async with _client() as client:
-            response = await _request(client, f"/orgs/{organization}/repos?type=private&per_page=1")
+            endpoint = "/installation/repositories?per_page=100" if app else f"/orgs/{organization}/repos?type=private&per_page=1"
+            response = await _request(client, endpoint)
+            _check_credential(response)
+    except GitHubCredentialError:
+        return "invalida"
     except GitHubUnavailable:
         return "indisponible"
-    if response.status_code == 401:
-        return "invalida"
     if not response.is_success:
         return "indisponible"
     try:
         repositories = response.json()
-    except ValueError:
+        if app:
+            repositories = [repo for repo in repositories["repositories"]
+                            if isinstance(repo, dict) and
+                            str(repo.get("full_name", "")).split("/")[0].lower() == organization.lower()]
+    except (ValueError, KeyError, TypeError):
         return "indisponible"
     if isinstance(repositories, list) and any(
         isinstance(repo, dict) and repo.get("private") is True for repo in repositories
