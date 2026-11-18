@@ -163,18 +163,20 @@ def _check_roster(conn: sqlite3.Connection, section: str, members: list[dict]) -
     return len(unmatched)
 
 
-def register_team_db(team_name: str, section: str, modality: Modality, members: list[dict], github_repository: str) -> str:
+def register_team_db(team_name: str, section: str, modality: Modality, members: list[dict], github_repository: str,
+                     repository_status: str = "verificado", retry_at: int = 0) -> str:
     token, salt, token_hash = _new_token()
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         unmatched = _check_roster(conn, section, members)
         try:
             conn.execute("""
-                INSERT INTO teams (team_name, token_hash, salt, section, modality, members, created_at, github_repository)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO teams (team_name, token_hash, salt, section, modality, members, created_at, github_repository,
+                    repository_verification_status, repository_verification_next_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 team_name, token_hash, salt, section, modality,
-                json.dumps(members), datetime.now(timezone.utc).isoformat(), github_repository,
+                json.dumps(members), datetime.now(timezone.utc).isoformat(), github_repository, repository_status, retry_at,
             ))
         except sqlite3.IntegrityError as exc:
             if "UNIQUE constraint failed: teams.github_repository" in str(exc):
@@ -436,7 +438,7 @@ def list_teams(section: str | None) -> list[dict]:
     with _connect() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
-            SELECT id, team_name, section, modality, members, github_repository, created_at
+            SELECT id, team_name, section, modality, members, github_repository, created_at, repository_verification_status
             FROM teams WHERE (? IS NULL OR section = ?) ORDER BY id
         """, (section, section))
         return [dict(row) | {"members": json.loads(row["members"])} for row in rows]
@@ -453,10 +455,29 @@ def change_assignment(team_id: int, previous: tuple, section: str, repository: s
     with _connect() as conn:
         try:
             return conn.execute("""
-                UPDATE teams SET section = ?, github_repository = ?
+                UPDATE teams SET section = ?, github_repository = ?,
+                    repository_verification_status = CASE WHEN ? IS NULL THEN 'pendiente' ELSE 'verificado' END,
+                    repository_verification_next_at = 0
                 WHERE id = ? AND section = ? AND github_repository IS ?
-            """, (section, repository, team_id, *previous)).rowcount == 1
+            """, (section, repository, repository, team_id, *previous)).rowcount == 1
         except sqlite3.IntegrityError as exc:
             if "teams.github_repository" not in str(exc):
                 raise
             raise ValueError("El repositorio ya está asignado a otro equipo. Consulta al docente.") from None
+
+def pending_repositories():
+    with _connect() as conn:
+        return conn.execute("""
+            SELECT id, github_repository, section FROM teams
+            WHERE repository_verification_status = 'pendiente' AND github_repository IS NOT NULL
+              AND repository_verification_next_at <= unixepoch()
+            ORDER BY repository_verification_next_at, id LIMIT 20
+        """).fetchall()
+
+
+def update_repository_verification(team_id, repository, section, status, next_at):
+    with _connect() as conn:
+        return conn.execute("""
+            UPDATE teams SET repository_verification_status = ?, repository_verification_next_at = ?
+            WHERE id = ? AND github_repository = ? AND section = ? AND repository_verification_status = 'pendiente'
+        """, (status, next_at, team_id, repository, section)).rowcount == 1

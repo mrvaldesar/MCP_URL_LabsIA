@@ -189,7 +189,7 @@ El destino y su directorio deben estar en un filesystem que admita enlaces duros
 
 1. Consulta el calendario de ambas secciones y el estado de las recepciones activas. Programa la actualización fuera de las ventanas, anuncia el mantenimiento y pausa el despliegue automático si corresponde.
 2. Prueba la imagen y una restauración en preproducción. En el servicio, drena las solicitudes en curso, detén las escrituras y crea una última copia externa.
-3. Arranca la nueva versión sobre el volumen persistente. El arranque aplica las migraciones 001 a 007 en orden, solo si faltan. Las nuevas son `004_github_verification.sql`, `005_delivery_windows.sql`, `006_submission_team_snapshot.sql` y `007_verification_retries.sql`.
+3. Arranca la nueva versión sobre el volumen persistente. El arranque aplica las migraciones 001 a 009 en orden, solo si faltan.
 4. Verifica `/health`, `tools/list`, el CSV de ambas secciones y el acceso de GitHub. Mantén una réplica activa antes de reabrir. Configura el monitor según la sección de arranque en frío.
 5. Para revertir, pausa el tráfico, conserva una copia de la base posterior a la actualización, restaura la copia anterior y arranca el código anterior. Esta reversión restaura los recibos hasta la toma de esa copia. Concilia con las etiquetas oficiales cualquier recibo posterior antes de reabrir el servicio.
 
@@ -204,3 +204,9 @@ La ventana total de reintentos comienza al recibir el envío. `GITHUB_RETRY_WIND
 `POST /admin/submissions/{id}/reset-verification` reinicia el contador y abre una nueva ventana de reintento para un recibo pendiente de la sección autorizada. Conserva la fecha de recepción, el envío y cualquier espera ya programada. La acción queda auditada. La migración `008_retry_schedule.sql` agrega la programación persistente.
 
 La instalación de la GitHub App debe seleccionar **All repositories** para la organización del curso, incluidos los repositorios que se creen después. `GET /admin/github/health` comprueba la instalación de esa organización con un JWT de la App y devuelve `github_app_repository_coverage`. `todos` confirma la selección completa, `seleccionados` requiere ajustar la instalación, `desconocida` indica que GitHub o la configuración impidieron confirmarla y `no_aplica` corresponde a la alternativa sin App. La selección de repositorios y los permisos de lectura se configuran por separado.
+
+### Repositorios pendientes
+
+Si GitHub está indisponible, limita las solicitudes, rechaza la credencial o no permite confirmar un 404, el registro entrega la credencial de equipo y deja el repositorio pendiente. La migración `009_team_repository_verification.sql` guarda ese estado. El proceso reintenta la comprobación y `GET /admin/teams` muestra `repository_verification_status`. Si después confirma que el repositorio falta o es incompatible, marca `inconsistente` y conserva el equipo para que el docente corrija la asignación.
+
+Un 404 definitivo requiere que la App cubra todos los repositorios y que su credencial de instalación pueda consultar GitHub. Con un token de grano fino, configura `GITHUB_PAT_ALL_REPOSITORIES=true` solo si confirmaste que el token y su titular tienen visibilidad de todos los repositorios privados de la organización. El servicio verifica además que el token pueda ver repositorios privados. Sin esa confirmación, un 404 deja el registro pendiente.

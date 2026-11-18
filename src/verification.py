@@ -59,6 +59,25 @@ async def retry(receipt_id: int, section: str | None, actor: str):
                     "verified_ci_status": ci, "verification_retry_count": count}
 
 
+async def retry_repositories():
+    for team_id, repository, section in await run_in_threadpool(database.pending_repositories):
+        if github.credential_alert_active():
+            break
+        next_at = 0
+        try:
+            await github.validate_repository(repository, section)
+        except github.GitHubUnavailable as exc:
+            status, next_at = "pendiente", max(int(time()) + retry_interval(), exc.retry_at)
+        except ValueError:
+            status = "inconsistente"
+        else:
+            status = "verificado"
+        updated = await run_in_threadpool(database.update_repository_verification,
+                                          team_id, repository, section, status, next_at)
+        if updated:
+            logger.info("Repositorio reintentado actor=reintento_automático equipo=%d estado=%s", team_id, status)
+
+
 async def retry_batch():
     threshold = stale_minutes()
     aged = await run_in_threadpool(database.aged_pending_count, threshold)
@@ -69,6 +88,7 @@ async def retry_batch():
         return
     for receipt_id in await run_in_threadpool(database.pending_verification_ids, max_attempts(), retry_window()):
         await retry(receipt_id, None, "reintento_automático")
+    await retry_repositories()
 
 
 async def _loop(interval: int):

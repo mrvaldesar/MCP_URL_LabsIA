@@ -134,9 +134,15 @@ async def register_team(
             raise ValueError(f"Demasiados intentos de registro para un carné. Reintenta en {retry_after} segundos.")
 
     try:
-        warnings = await validate_repository(github_repository, section, [m.github_user for m in members])
+        repository_status, retry_at = "verificado", 0
+        try:
+            warnings = await validate_repository(github_repository, section, [m.github_user for m in members])
+        except GitHubUnavailable as exc:
+            repository_status, retry_at = "pendiente", exc.retry_at
+            warnings = ["La verificación del repositorio queda pendiente. El servidor reintentará automáticamente."]
         request.state.issued_team_token = await run_in_threadpool(
-            register_team_db, team_name, section, modality, [m.model_dump() for m in members], github_repository
+            register_team_db, team_name, section, modality, [m.model_dump() for m in members],
+            github_repository, repository_status, retry_at,
         )
     except database.RosterMismatch as exc:
         for carnet in set(exc.carnets):

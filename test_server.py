@@ -54,6 +54,7 @@ MEMBER = {"github_user": "alumna-uno", "carnet": "1234524"}
 @pytest.fixture
 def github_api(monkeypatch):
     monkeypatch.setenv("GITHUB_COURSE_ORG", "curso")
+    monkeypatch.setenv("GITHUB_PAT_ALL_REPOSITORIES", "true")
     monkeypatch.setenv("GITHUB_API_TOKEN", "github-test-credential")
     requests = []
     commit_sha = "abc1234" + "0" * 33
@@ -317,7 +318,7 @@ def test_sql_migrations_run_once(grader_db):
             ("001_initial_schema.sql",), ("002_teacher_operations.sql",),
             ("003_team_github_repository.sql",), ("004_github_verification.sql",),
             ("005_delivery_windows.sql",), ("006_submission_team_snapshot.sql",), ("007_verification_retries.sql",),
-            ("008_retry_schedule.sql",),
+            ("008_retry_schedule.sql",), ("009_team_repository_verification.sql",),
         ]
 
 
@@ -742,7 +743,7 @@ def test_proxy_trust_boundary():
     ("lab-ia-s02-valido", "no figura como colaborador"),
     ("lab-ia-s02-sin-permisos", "Equipo registrado."),
     ("lab-ia-s02-inexistente", "El repositorio no existe"),
-    ("lab-ia-s02-sin-red", "Intenta más tarde"),
+    ("lab-ia-s02-sin-red", "queda pendiente"),
     ("lab-ia-s01-valido", "debe coincidir con la sección"),
     ("curso/lab-ia-s02-valido", "Usa el nombre corto"),
 ])
@@ -1032,7 +1033,12 @@ def test_upgrade_from_003_preserves_legacy_receipt_and_team_token(tmp_path, monk
     monkeypatch.setattr(database, "MIGRATIONS_DIR", legacy_migrations)
     monkeypatch.setenv("STRICT_ROSTER", "false")
     database.init_db()
-    token = database.register_team_db("Equipo anterior", "01", "individual", [MEMBER], "lab-ia-s01-viejo")
+    token, salt, token_hash = database._new_token()
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("""
+            INSERT INTO teams (team_name, section, modality, members, github_repository, salt, token_hash, created_at)
+            VALUES ('Equipo anterior', '01', 'individual', ?, 'lab-ia-s01-viejo', ?, ?, '2026-01-01T00:00:00Z')
+        """, (json.dumps([MEMBER]), salt, token_hash))
     with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute("""
             INSERT INTO submissions (team_id, deliverable_id, label, commit_hash, declared_metrics_json,
@@ -1364,3 +1370,51 @@ def test_app_coverage_uses_organization_installation_metadata(client, monkeypatc
     assert result.json()["github_app_repository_coverage"] == coverage
     if selection == "selected":
         assert "debe instalarse para todos" in grader_db.with_name("grader.log").read_text()
+
+
+@pytest.mark.parametrize("status_code", [502, 429, 401, 403, 404])
+def test_repository_registration_survives_uncertain_github_and_recovers(
+    client, grader_db, monkeypatch, status_code,
+):
+    from src import verification
+
+    monkeypatch.delenv("GITHUB_PAT_ALL_REPOSITORIES")
+    repository = "lab-ia-s02-pendiente"
+    api_path = f"/repos/curso/{repository}"
+    response_code = status_code
+
+    async def request(http_client, path):
+        assert path == api_path or path.startswith(api_path + "/collaborators/")
+        if path != api_path:
+            return httpx.Response(204)
+        return httpx.Response(response_code, json={"full_name": f"curso/{repository}", "private": True},
+                              request=httpx.Request("GET", "https://api.github.com" + path))
+
+    monkeypatch.setattr(github, "_request", request)
+    registered = register(client, "Pendiente", [MEMBER], github_repository=repository)
+    token = registered.headers["X-Team-Token"]
+    assert token not in registered.text
+    assert "verificación del repositorio queda pendiente" in registered.text
+    assert database.list_teams("02")[0]["repository_verification_status"] == "pendiente"
+
+    response_code = 200
+    asyncio.run(verification.retry_batch())
+    assert database.list_teams("02")[0]["repository_verification_status"] == "verificado"
+    assert database.resolve_team_id(token) == 1
+    assert not github.credential_alert_active()
+    assert "Repositorio reintentado actor=reintento_automático equipo=1 estado=verificado" in (
+        grader_db.with_name("grader.log").read_text()
+    )
+
+
+def test_pending_repository_absence_after_recovery_keeps_team(client, monkeypatch):
+    from src import verification
+
+    monkeypatch.delenv("GITHUB_PAT_ALL_REPOSITORIES")
+    response = register(client, "Pendiente", [MEMBER], github_repository="lab-ia-s02-inexistente")
+    assert "X-Team-Token" in response.headers
+    assert database.list_teams(None)[0]["repository_verification_status"] == "pendiente"
+    monkeypatch.setenv("GITHUB_PAT_ALL_REPOSITORIES", "true")
+    asyncio.run(verification.retry_batch())
+    assert database.list_teams(None)[0]["repository_verification_status"] == "inconsistente"
+    assert database.resolve_team_id(response.headers["X-Team-Token"]) == 1

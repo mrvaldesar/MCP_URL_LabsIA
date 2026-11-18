@@ -231,6 +231,32 @@ async def _get(client: httpx.AsyncClient, path: str) -> dict:
     raise GitHubUnavailable("GitHub no pudo verificar la solicitud. Intenta más tarde o avisa al docente.", retry_at=retry_at(response))
 
 
+async def _can_confirm_absence(client, organization: str) -> bool:
+    if any(_app_config()):
+        if await app_repository_coverage() != "todos":
+            return False
+        try:
+            listing = await _get(client, "/installation/repositories?per_page=1")
+        except GitHubNotFound:
+            return False
+        return isinstance(listing.get("repositories"), list)
+    if os.getenv("GITHUB_PAT_ALL_REPOSITORIES", "").lower() != "true":
+        return False
+    # The operator attests full visibility. The API probe independently
+    # confirms that the credential can read private repositories in the org.
+    response = await _request(client, f"/orgs/{organization}/repos?type=private&per_page=1")
+    _check_credential(response)
+    if not response.is_success:
+        raise GitHubUnavailable("GitHub no pudo confirmar acceso a la organización.", retry_at=retry_at(response))
+    try:
+        repos = response.json()
+    except ValueError:
+        return False
+    return isinstance(repos, list) and any(
+        isinstance(repo, dict) and repo.get("private") is True for repo in repos
+    )
+
+
 async def validate_repository(repository: str, section: str, users=()) -> list[str]:
     match = COURSE_REPO_PATTERN.fullmatch(repository)
     if match is None:
@@ -242,7 +268,9 @@ async def validate_repository(repository: str, section: str, users=()) -> list[s
         try:
             metadata = await _get(client, path)
         except GitHubNotFound:
-            raise ValueError("El repositorio no existe o la credencial del curso no puede verlo. Verifica el nombre o consulta al docente.") from None
+            if await _can_confirm_absence(client, path.split("/")[2]):
+                raise ValueError("El repositorio no existe en la organización del curso. Verifica el nombre o consulta al docente.") from None
+            raise GitHubUnavailable("GitHub no permite confirmar si el repositorio existe.") from None
         full_name = metadata.get("full_name")
         if not isinstance(full_name, str) or full_name.lower() != path.removeprefix("/repos/").lower():
             raise GitHubUnavailable("GitHub devolvió datos inesperados. Reintenta el registro.")
