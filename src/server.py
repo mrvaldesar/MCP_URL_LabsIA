@@ -53,7 +53,7 @@ VALIDATION_HINTS = {
     "members": "Envía una lista de uno a tres integrantes con github_user y carnet.",
     "github_user": "Usa el usuario GitHub sin @, con hasta 39 caracteres, letras ASCII, números y guiones simples.",
     "carnet": "Usa el formato de carné del curso como texto y conserva los ceros iniciales.",
-    "github_repository": "Usa el nombre corto del repositorio como texto.",
+    "github_repository": "Indica github_repository con el nombre corto del repositorio privado de tu sección.",
 }
 
 
@@ -107,7 +107,7 @@ async def register_team(
     modality: Modality,
     members: Annotated[list[Member], Field(min_length=1, max_length=3)],
     ctx: Context,
-    github_repository: str | None = None,
+    github_repository: str,
 ) -> str:
     """Registra el equipo y confirma el registro.
 
@@ -129,9 +129,7 @@ async def register_team(
             raise ValueError(f"Demasiados intentos de registro para un carné. Reintenta en {retry_after} segundos.")
 
     try:
-        warnings = []
-        if github_repository is not None:
-            warnings = await validate_repository(github_repository, section, [m.github_user for m in members])
+        warnings = await validate_repository(github_repository, section, [m.github_user for m in members])
         request.state.issued_team_token = await run_in_threadpool(
             register_team_db, team_name, section, modality, [m.model_dump() for m in members], github_repository
         )

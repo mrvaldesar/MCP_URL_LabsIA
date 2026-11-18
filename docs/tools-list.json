@@ -63,23 +63,16 @@
               "type": "array"
             },
             "github_repository": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Github Repository"
+              "title": "Github Repository",
+              "type": "string"
             }
           },
           "required": [
             "team_name",
             "section",
             "modality",
-            "members"
+            "members",
+            "github_repository"
           ],
           "title": "register_teamArguments",
           "type": "object"

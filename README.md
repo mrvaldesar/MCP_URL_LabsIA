@@ -43,7 +43,7 @@ La capa gratuita de Render suspende servicios inactivos. En Railway, el servicio
 
 ### Verificación de entregas en GitHub
 
-La etiqueta publicada en GitHub es la entrega oficial. El servidor registra el recibo. Usa una organización para las dos secciones y un repositorio privado por equipo, con nombre corto `lab-ia-s01-<equipo>` o `lab-ia-s02-<equipo>`. Incluye `github_repository` al registrarte. Los clientes existentes pueden omitirlo y el docente puede asignarlo antes de la primera entrega con `PATCH /admin/teams/{id}/assignment`.
+La etiqueta publicada en GitHub es la entrega oficial. El servidor registra el recibo. Usa una organización para las dos secciones y un repositorio privado por equipo, con nombre corto `lab-ia-s01-<equipo>` o `lab-ia-s02-<equipo>`. El argumento `github_repository` es obligatorio en el registro.
 
 Una indisponibilidad de GitHub durante la entrega genera un recibo con `verification_status=pendiente`. Conserva el recibo para que el docente pueda reintentar la verificación. El CSV incluye el CI declarado y `verified_ci_status`, que refleja la consulta a GitHub al verificar el recibo.
 

@@ -163,7 +163,7 @@ def _check_roster(conn: sqlite3.Connection, section: str, members: list[dict]) -
     return len(unmatched)
 
 
-def register_team_db(team_name: str, section: str, modality: Modality, members: list[dict], github_repository: str | None = None) -> str:
+def register_team_db(team_name: str, section: str, modality: Modality, members: list[dict], github_repository: str) -> str:
     token, salt, token_hash = _new_token()
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")

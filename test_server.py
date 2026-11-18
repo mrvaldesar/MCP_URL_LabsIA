@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import hashlib
+from uuid import uuid4
 import io
 import json
 import sqlite3
@@ -41,7 +42,7 @@ def register(client, team_name, members, modality="individual", section="02", **
         "name": "register_team",
         "arguments": {
             "team_name": team_name, "section": section, "modality": modality,
-            "members": members, **extra,
+            "members": members, "github_repository": f"lab-ia-s{section}-{uuid4().hex}", **extra,
         },
     })
 
@@ -59,7 +60,6 @@ def github_api(monkeypatch):
     nested_sha = "2" * 40
 
     def handle(request):
-        requests.append(request)
         assert request.url.host == "api.github.com"
         assert request.headers["Authorization"] == "Bearer github-test-credential"
         parts = request.url.path.split("/")
@@ -75,8 +75,10 @@ def github_api(monkeypatch):
                 return httpx.Response(200, json={"full_name": "/".join(parts[2:4]), "private": True})
             if parts[3].endswith("sin-permisos"):
                 return httpx.Response(403)
-            return httpx.Response(200 if len(parts) == 5 else 404)
-        assert parts[3] in {f"equipo-{team_id}" for team_id in range(1, 21)}
+            if parts[4] == "collaborators":
+                return httpx.Response(200 if len(parts) == 5 else 404)
+        requests.append(request)
+        assert parts[3].startswith(("equipo-", "lab-ia-"))
         path = parts[4:]
         if len(path) == 3 and path[-1] == "status":
             return httpx.Response(200, json={"state": "success", "total_count": 1})
@@ -475,6 +477,8 @@ def test_github_rejection_writes_no_receipt(client, grader_db, label, commit_has
 
 def test_github_verification_requires_assigned_repository(client, grader_db, github_api):
     token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    with closing(sqlite3.connect(grader_db)) as conn, conn:
+        conn.execute("UPDATE teams SET github_repository = NULL")
     result = submit(client, token).json()["result"]
     assert result["isError"] is True
     assert "no tiene un repositorio" in result["content"][0]["text"]
@@ -867,7 +871,7 @@ def test_hidden_contents_404_keeps_receipt(client, grader_db):
     assert result["structuredContent"]["verification_status"] == "pendiente"
 
 
-def test_registration_global_limit_spans_client_ips(grader_db, monkeypatch):
+def test_registration_global_limit_spans_client_ips(grader_db, monkeypatch, github_api):
     monkeypatch.setenv("REGISTER_GLOBAL_LIMIT", "1")
     app = create_server().streamable_http_app()
     with TestClient(app, client=("192.0.2.1", 12345), base_url="http://localhost:8000") as first:
@@ -951,7 +955,7 @@ def test_reference_matches_live_tools_list(client, capsys):
     assert json.loads(capsys.readouterr().out) == expected
 
 
-def test_streamable_http_over_tcp(grader_db):
+def test_streamable_http_over_tcp(grader_db, github_api):
     import socket
     from threading import Thread
     from time import monotonic, sleep
@@ -1056,3 +1060,12 @@ def test_retry_inconsistency_and_scope(client, grader_db, monkeypatch):
     assert client.post(path, headers=admin).json()["verification_status"] == "inconsistente"
     with closing(sqlite3.connect(grader_db)) as conn:
         assert conn.execute("SELECT attempt, verification_status FROM submissions").fetchall() == [(1, "inconsistente")]
+
+def test_registration_requires_repository(client, grader_db):
+    response = rpc(client, "tools/call", {"name": "register_team", "arguments": {
+        "team_name": "Sin repositorio", "section": "02", "modality": "individual", "members": [MEMBER],
+    }})
+    assert response.json()["result"]["isError"]
+    assert "Indica github_repository" in response.text
+    assert "X-Team-Token" not in response.headers
+    assert database.list_teams(None) == []
