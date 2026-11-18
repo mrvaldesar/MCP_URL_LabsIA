@@ -1069,3 +1069,16 @@ def test_registration_requires_repository(client, grader_db):
     assert "Indica github_repository" in response.text
     assert "X-Team-Token" not in response.headers
     assert database.list_teams(None) == []
+
+
+def test_failed_carnet_limit_does_not_cross_ips(grader_db, github_api, monkeypatch):
+    monkeypatch.delenv("STRICT_ROSTER")
+    monkeypatch.setenv("REGISTER_CARNET_FAILURE_LIMIT", "1")
+    database.replace_roster("02", [(MEMBER["github_user"], MEMBER["carnet"])])
+    app = create_server().streamable_http_app()
+    with TestClient(app, client=("192.0.2.10", 12345), base_url="http://localhost:8000") as other:
+        wrong = MEMBER | {"github_user": "equivocado"}
+        assert "padrón" in register(other, "Equivocado", [wrong]).text
+        assert "Demasiados intentos" in register(other, "Equivocado", [MEMBER]).text
+        student = TestClient(app, client=("192.0.2.11", 12345), base_url="http://localhost:8000")
+        assert "X-Team-Token" in register(student, "Estudiante", [MEMBER]).headers

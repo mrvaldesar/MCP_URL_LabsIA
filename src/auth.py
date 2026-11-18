@@ -114,6 +114,7 @@ class TeamAuthMiddleware:
                 return
 
             state["carnet_limit"] = self.carnet_limit
+            state["registration_ip"] = ip
 
         if method not in PUBLIC_METHODS and not registration:
             authorization = Headers(scope=scope).get("authorization", "")

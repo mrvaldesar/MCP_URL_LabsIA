@@ -123,8 +123,9 @@ async def register_team(
     validate_team_size(modality, len(members))
 
     carnet_limit = request.state.carnet_limit
+    ip = request.state.registration_ip
     for member in members:
-        retry_after = carnet_limit.retry_after(member.carnet, consume=False)
+        retry_after = carnet_limit.retry_after((ip, member.carnet), consume=False)
         if retry_after is not None:
             raise ValueError(f"Demasiados intentos de registro para un carné. Reintenta en {retry_after} segundos.")
 
@@ -135,7 +136,7 @@ async def register_team(
         )
     except database.RosterMismatch as exc:
         for carnet in set(exc.carnets):
-            carnet_limit.retry_after(carnet)
+            carnet_limit.retry_after((ip, carnet))
         raise
     except ValueError:
         raise

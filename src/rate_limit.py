@@ -1,4 +1,5 @@
 from collections import OrderedDict, deque
+from collections.abc import Hashable
 from math import ceil
 from threading import Lock
 from time import monotonic
@@ -8,10 +9,10 @@ class SlidingWindow:
     def __init__(self, limit: int, seconds: int):
         self.limit = limit
         self.seconds = seconds
-        self.requests: OrderedDict[str, deque[float]] = OrderedDict()
+        self.requests: OrderedDict[Hashable, deque[float]] = OrderedDict()
         self.lock = Lock()
 
-    def retry_after(self, key: str, *, consume: bool = True) -> int | None:
+    def retry_after(self, key: Hashable, *, consume: bool = True) -> int | None:
         with self.lock:
             now = monotonic()
             cutoff = now - self.seconds

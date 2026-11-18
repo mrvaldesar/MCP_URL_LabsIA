@@ -102,7 +102,7 @@ Para actualizar un equipo, envía `members` con la lista completa de integrantes
 | `REGISTER_IP_LIMIT` | `80` | Intentos de registro por IP. Permite 64 equipos en una red compartida y 16 intentos adicionales. |
 | `REGISTER_WINDOW_SECONDS` | `600` | Ventana móvil común de los límites de registro. |
 | `REGISTER_GLOBAL_LIMIT` | `256` | Intentos totales por proceso en la ventana, cuatro veces el tamaño esperado de la cohorte. |
-| `REGISTER_CARNET_FAILURE_LIMIT` | `5` | Intentos sin coincidencia en el padrón estricto antes de limitar ese carné durante la ventana. |
+| `REGISTER_CARNET_FAILURE_LIMIT` | `5` | Intentos sin coincidencia en el padrón estricto antes de limitar el par IP y carné durante la ventana. |
 | `TRUSTED_PROXY_CIDRS` | Vacío | Redes de proxies autorizados a proporcionar `X-Forwarded-For`, separadas por comas. |
 | `TEACHER_ADMIN_CREDENTIALS` | `[]` | Lista JSON de docentes con identificador, sección y SHA-256 de su token. |
 | `GITHUB_COURSE_ORG` | Vacío | Organización única del curso. |
