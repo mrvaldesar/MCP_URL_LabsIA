@@ -178,6 +178,7 @@ def test_submission_requires_bearer_and_uses_authenticated_section(client, grade
         "receipt_id": 1, "deliverable_id": "D1", "label": "D1", "section": "02",
         "status": "received", "attempt": 1, "received_at_utc": first["received_at_utc"],
         "verification_status": "verificado", "verified_ci_status": "exitoso",
+        "timing": "sin_plazo", "late_minutes": 0,
     }
     assert datetime.fromisoformat(first["received_at_utc"]).utcoffset() == timedelta(0)
     assert second["attempt"] == 2
@@ -299,6 +300,7 @@ def test_sql_migrations_run_once(grader_db):
         assert conn.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall() == [
             ("001_initial_schema.sql",), ("002_teacher_operations.sql",),
             ("003_team_github_repository.sql",), ("004_github_verification.sql",),
+            ("005_delivery_windows.sql",),
         ]
 
 
@@ -800,3 +802,23 @@ def test_omitted_label_defaults_to_deliverable(client, grader_db):
         "deliverable_id": "D1", "commit_hash": "abc1234", "metrics_json": "{}", "is_ci_passing": True,
     }}, token=token)
     assert response.json()["result"]["structuredContent"]["label"] == "D1"
+
+@pytest.mark.parametrize(("opens", "closes", "expected"), [
+    ("2000-01-01", "2001-01-01", "tardío"),
+    ("2000-01-01", "2099-01-01", "a_tiempo"),
+    ("2098-01-01", "2099-01-01", "sin_plazo"),
+])
+def test_delivery_windows_and_csv(client, grader_db, opens, closes, expected):
+    token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    assign_repository(grader_db)
+    headers = {"Authorization": "Bearer admin-test-credential"}
+    window = {"section": "02", "deliverable_id": "D1", "opens_at": opens + "T00:00:00Z",
+              "closes_at": closes + "T00:00:00Z"}
+    assert client.put("/admin/windows", json=window, headers=headers).status_code == 200
+    receipt = submit(client, token).json()["result"]["structuredContent"]
+    assert receipt["timing"] == expected
+    assert (receipt["late_minutes"] > 0) == (expected == "tardío")
+    rows = csv.DictReader(io.StringIO(client.get("/admin/export?section=02", headers=headers).text))
+    row = next(rows)
+    assert row["timing"] == expected and int(row["late_minutes"]) == receipt["late_minutes"]
+    assert (row["declared_is_ci_passing"], row["verified_ci_status"]) == ("1", "exitoso")

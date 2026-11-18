@@ -4,7 +4,7 @@ import re
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Annotated, Literal
+from typing import Annotated
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -22,12 +22,11 @@ from src.audit import AuditMiddleware, audit_log, logger
 from src.auth import TeamAuthMiddleware
 from src.database import Receipt, get_team_repository, init_db, register_team_db, save_submission_db
 from src.github import GitHubUnavailable, validate_repository, verified_ci_status, verify_submission
-from src.models import CARNET_PATTERN, Member, Modality, Section, validate_team_size
+from src.models import CARNET_PATTERN, DeliverableId, Member, Modality, Section, validate_team_size
 
 COMMIT_PATTERN = r"^[0-9a-f]{7,40}$"
 MAX_METRICS_BYTES = 64 * 1024
 
-DeliverableId = Literal["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10"]
 
 
 async def health(request: Request):
@@ -188,6 +187,7 @@ async def submit_lab_results(
     except (ValueError, RecursionError):
         raise ValueError("metrics_json debe ser un JSON válido.") from None
 
+    received_at = datetime.now(timezone.utc)
     try:
         repository = await run_in_threadpool(get_team_repository, team_id)
         if repository is None:
@@ -200,7 +200,7 @@ async def submit_lab_results(
             verification = "verificado"
             ci = await verified_ci_status(repository, verified_sha)
         return await run_in_threadpool(
-            save_submission_db, team_id, deliverable_id, label, verified_sha, metrics_json, is_ci_passing, repository, verification, ci
+            save_submission_db, team_id, deliverable_id, label, verified_sha, metrics_json, is_ci_passing, repository, verification, ci, received_at
         )
     except ValueError:
         raise

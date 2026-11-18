@@ -6,6 +6,7 @@ import secrets
 import sqlite3
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
+from math import ceil
 from pathlib import Path
 from typing import TypedDict
 
@@ -26,6 +27,8 @@ class Receipt(TypedDict):
     section: str
     verification_status: str
     verified_ci_status: str
+    timing: str
+    late_minutes: int
 
 
 @contextmanager
@@ -219,6 +222,7 @@ def save_submission_db(
     repository: str,
     verification_status: str = "verificado",
     verified_ci_status: str = "desconocido",
+    received_at: datetime | None = None,
 ) -> Receipt:
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -234,15 +238,17 @@ def save_submission_db(
             SELECT COALESCE(MAX(attempt), 0) + 1 FROM submissions
             WHERE team_id = ? AND deliverable_id = ?
         """, (team_id, deliverable_id)).fetchone()[0]
-        received_at = datetime.now(timezone.utc).isoformat()
+        received = received_at or datetime.now(timezone.utc)
+        timing, late_minutes = delivery_timing(conn, section, deliverable_id, received)
+        received_at = received.isoformat()
         cursor = conn.execute("""
             INSERT INTO submissions (
                 team_id, deliverable_id, label, commit_hash, declared_metrics_json,
                 declared_is_ci_passing, received_at_utc, attempt, github_repository, verification_status,
-                verified_ci_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                verified_ci_status, received_section, timing, late_minutes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (team_id, deliverable_id, label, commit_hash, metrics_json, is_ci_passing, received_at, attempt,
-              repository, verification_status, verified_ci_status))
+              repository, verification_status, verified_ci_status, section, timing, late_minutes))
         return Receipt(
             receipt_id=cursor.lastrowid,
             deliverable_id=deliverable_id,
@@ -253,6 +259,8 @@ def save_submission_db(
             section=section,
             verification_status=verification_status,
             verified_ci_status=verified_ci_status,
+            timing=timing,
+            late_minutes=late_minutes,
         )
 
 
@@ -324,8 +332,7 @@ def pending_submission(receipt_id: int, section: str | None):
     with _connect() as conn:
         return conn.execute("""
             SELECT s.github_repository, s.label, s.commit_hash FROM submissions AS s
-            JOIN teams AS t ON t.id = s.team_id
-            WHERE s.id = ? AND s.verification_status = 'pendiente' AND (? IS NULL OR t.section = ?)
+            WHERE s.id = ? AND s.verification_status = 'pendiente' AND (? IS NULL OR s.received_section = ?)
         """, (receipt_id, section, section)).fetchone()
 
 
@@ -334,5 +341,28 @@ def finish_verification(receipt_id: int, sha: str, status: str, ci: str, section
         return conn.execute("""
             UPDATE submissions SET commit_hash = ?, verification_status = ?, verified_ci_status = ?
             WHERE id = ? AND verification_status = 'pendiente'
-              AND (? IS NULL OR team_id IN (SELECT id FROM teams WHERE section = ?))
+              AND (? IS NULL OR received_section = ?)
         """, (sha, status, ci, receipt_id, section, section)).rowcount == 1
+
+def delivery_timing(conn, section, deliverable_id, received):
+    window = conn.execute("""
+        SELECT opens_at_utc, closes_at_utc FROM delivery_windows
+        WHERE section = ? AND deliverable_id = ?
+    """, (section, deliverable_id)).fetchone()
+    if window is None:
+        return "sin_plazo", 0
+    opens, closes = (datetime.fromisoformat(value) for value in window)
+    if received < opens:
+        return "sin_plazo", 0
+    if received > closes:
+        return "tardío", ceil((received - closes).total_seconds() / 60)
+    return "a_tiempo", 0
+
+
+def set_delivery_window(section, deliverable_id, opens, closes):
+    with _connect() as conn:
+        conn.execute("""
+            INSERT INTO delivery_windows (section, deliverable_id, opens_at_utc, closes_at_utc)
+            VALUES (?, ?, ?, ?) ON CONFLICT (section, deliverable_id) DO UPDATE SET
+                opens_at_utc = excluded.opens_at_utc, closes_at_utc = excluded.closes_at_utc
+        """, (section, deliverable_id, opens, closes))

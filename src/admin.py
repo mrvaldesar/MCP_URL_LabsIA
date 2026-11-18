@@ -2,9 +2,10 @@ import hmac
 import io
 import os
 import sqlite3
+from datetime import timezone
 from functools import wraps
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -15,7 +16,7 @@ from src.audit import logger
 from src.auth import MAX_REQUEST_BYTES, TOKEN_PATTERN
 from src.export import export_section
 from src import github
-from src.models import Member, Modality, Section
+from src.models import DeliverableId, Member, Modality, Section
 
 NO_STORE = {"Cache-Control": "no-store"}
 
@@ -162,7 +163,36 @@ async def retry_verification(request: Request):
     return JSONResponse({"receipt_id": receipt_id, "verification_status": status, "verified_ci_status": ci})
 
 
+class DeliveryWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    section: Section
+    deliverable_id: DeliverableId
+    opens_at: AwareDatetime
+    closes_at: AwareDatetime
+
+
+@admin_only
+async def set_window(request: Request):
+    body = await read_admin_body(request)
+    if body is None:
+        return JSONResponse({"error": "La solicitud supera 1 MiB."}, status_code=413)
+    try:
+        window = DeliveryWindow.model_validate_json(body)
+    except ValidationError:
+        return JSONResponse({"error": "Indica sección, entregable y fechas ISO 8601 con zona horaria."}, status_code=400)
+    if window.opens_at >= window.closes_at:
+        return JSONResponse({"error": "El cierre debe ser posterior a la apertura."}, status_code=400)
+    opens, closes = (value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+                    for value in (window.opens_at, window.closes_at))
+    await run_in_threadpool(database.set_delivery_window, window.section, window.deliverable_id, opens, closes)
+    logger.info("Ventana configurada sección=%s entregable=%s", window.section, window.deliverable_id)
+    return JSONResponse({"section": window.section, "deliverable_id": window.deliverable_id,
+                         "opens_at_utc": opens, "closes_at_utc": closes})
+
+
 ROUTES = [
+    Route("/admin/windows", set_window, methods=["PUT"]),
     Route("/admin/github/health", github_health, methods=["GET"]),
     Route("/admin/submissions/{id:int}/retry-verification", retry_verification, methods=["POST"]),
     Route("/admin/teams/{id:int}/update", update_team, methods=["POST"]),

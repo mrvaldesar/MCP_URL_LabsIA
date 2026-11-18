@@ -4,6 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+DeliverableId = Literal["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10"]
 Section = Literal["01", "02"]
 Modality = Literal["individual", "pareja", "trio"]
 TEAM_SIZES: dict[Modality, int] = {"individual": 1, "pareja": 2, "trio": 3}
