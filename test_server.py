@@ -893,3 +893,48 @@ def test_scoped_window_reopening(client, grader_db, monkeypatch):
                       headers=headers).status_code == 400
     assert client.put("/admin/windows", json=window | {"closes_at": "2099-01-01"},
                       headers=headers).status_code == 400
+
+
+def test_backup_and_restore_preserves_synthetic_team_and_receipt(client, grader_db, tmp_path, monkeypatch):
+    from shutil import copyfile
+    from tools import backup_db
+
+    token = register(client, "Copia sintética", [MEMBER]).headers["X-Team-Token"]
+    assign_repository(grader_db)
+    assert submit(client, token).json()["result"]["structuredContent"]["receipt_id"] == 1
+    bucket = {}
+
+    def mock_transfer(source, target, *, upload=False):
+        if upload:
+            bucket[target] = tmp_path / "object.db"
+            copyfile(source, bucket[target])
+        else:
+            copyfile(bucket[source], target)
+
+    monkeypatch.setattr(backup_db, "transfer", mock_transfer)
+    uri = backup_db.backup(grader_db, "s3://backup-sintetico/grader")
+    restored = tmp_path / "restored.db"
+    backup_db.restore(uri, restored)
+    monkeypatch.setattr(database, "DB_PATH", restored)
+    assert database.check_health()
+    assert database.resolve_team_id(token) == 1
+    with closing(sqlite3.connect(restored)) as conn:
+        assert conn.execute("SELECT id, verification_status FROM submissions").fetchall() == [(1, "verificado")]
+    with pytest.raises(FileExistsError):
+        backup_db.restore(uri, restored)
+
+
+def test_backup_cli_s3_arguments_and_transfer(tmp_path, monkeypatch, capsys):
+    import sys
+    from tools import backup_db
+
+    calls = []
+    monkeypatch.setattr(backup_db.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd))
+    snapshot = tmp_path / "snapshot.db"
+    backup_db.transfer(snapshot, "s3://example/snapshot.db", upload=True)
+    assert calls[0] == ["aws", "s3", "cp", str(snapshot), "s3://example/snapshot.db",
+                        "--only-show-errors", "--sse", "AES256"]
+    monkeypatch.setattr(backup_db, "backup", lambda db, destination: destination + "/snapshot.db")
+    monkeypatch.setattr(sys, "argv", ["backup_db", "backup", "--destination", "s3://example"])
+    backup_db.main()
+    assert capsys.readouterr().out.strip() == "s3://example/snapshot.db"
