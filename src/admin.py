@@ -37,15 +37,6 @@ def admin_only(endpoint):
     return protected
 
 
-async def health(request: Request):
-    try:
-        await run_in_threadpool(database.check_health)
-    except sqlite3.Error:
-        logger.exception("Falló el chequeo de SQLite")
-        return JSONResponse({"status": "unavailable"}, status_code=503)
-    return JSONResponse({"status": "ok"})
-
-
 @admin_only
 async def rotate_token(request: Request):
     team_id = request.path_params["id"]
@@ -98,7 +89,6 @@ async def upload_roster(request: Request):
 
 
 ROUTES = [
-    Route("/health", health, methods=["GET"]),
     Route("/admin/teams/{id:int}/rotate-token", rotate_token, methods=["POST"]),
     Route("/admin/export", download_export, methods=["GET"]),
     Route("/admin/roster", upload_roster, methods=["POST"]),
