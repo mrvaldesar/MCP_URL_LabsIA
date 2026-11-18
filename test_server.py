@@ -90,7 +90,7 @@ def github_api(monkeypatch):
             return httpx.Response(404)
         if path == ["commits", "deadbee"]:
             return httpx.Response(200, json={"sha": "deadbee" + "0" * 33})
-        if path == ["commits", "abc1234"]:
+        if path in (["commits", "abc1234"], ["commits", commit_sha]):
             return httpx.Response(200, json={"sha": commit_sha})
         if path == ["git", "matching-refs", "tags"]:
             return httpx.Response(404) if parts[3] == "equipo-2" else httpx.Response(200, json=[])
@@ -100,6 +100,9 @@ def github_api(monkeypatch):
             return httpx.Response(200, json={"object": {"type": "commit", "sha": commit_sha}})
         assert path[:3] == ["git", "ref", "tags"]
         label = "/".join(path[3:])
+        if parts[3].endswith("-feliz"):
+            return httpx.Response(200, json={"ref": f"refs/tags/{label}",
+                                             "object": {"type": "commit", "sha": commit_sha}})
         if label == "D2":
             return httpx.Response(404)
         if label == "D3" and parts[3] == "equipo-3":
@@ -1194,3 +1197,48 @@ def test_tool_signature_requires_a_new_interface_version(client):
     assert fingerprint == INTERFACE_SIGNATURES[version], (
         f"Cambió la firma MCP. Publica una nueva interface_version con huella {fingerprint}."
     )
+
+
+@pytest.mark.parametrize("section", ["01", "02"])
+@pytest.mark.parametrize("sha_length", [7, 40])
+def test_happy_delivery_matrix_and_csv(client, github_api, monkeypatch, section, sha_length):
+    from datetime import timezone
+
+    from src import server
+
+    class FrozenTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 1, 1, 13, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(server, "datetime", FrozenTime)
+    full_sha = "abc1234" + "0" * 33
+    registration = register(client, "Equipo matriz", [MEMBER], section=section,
+                            github_repository=f"lab-ia-s{section}-feliz")
+    headers = {"Authorization": "Bearer admin-test-credential"}
+    window = {"section": section, "deliverable_id": "D1",
+              "opens_at": "2026-01-01T08:00:00Z", "closes_at": "2026-01-01T12:00:00Z"}
+    assert client.put("/admin/windows", headers=headers, json=window).status_code == 200
+
+    for number in range(1, 11):
+        deliverable = f"D{number}"
+        payload = submit(client, registration.headers["X-Team-Token"], deliverable_id=deliverable,
+                         label=deliverable, commit_hash=full_sha[:sha_length]).json()["result"]
+        assert payload["isError"] is False
+        receipt = payload["structuredContent"]
+        assert (receipt["status"], receipt["section"], receipt["label"]) == ("received", section, deliverable)
+        assert (receipt["verification_status"], receipt["verified_ci_status"]) == ("verificado", "exitoso")
+        assert (receipt["timing"], receipt["late_minutes"]) == (
+            ("tardío", 60) if number == 1 else ("sin_plazo", 0)
+        )
+    response = client.get(f"/admin/export?section={section}", headers=headers)
+    csv_rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert [row["label"] for row in csv_rows] == [f"D{number}" for number in range(1, 11)]
+    assert all(row["commit_hash"] == full_sha and row["section"] == section for row in csv_rows)
+    fields = ("section", "deliverable_id", "timing", "late_minutes", "verification_status",
+              "verified_ci_status", "verification_retry_count")
+    excerpt = [tuple(row[field] for field in fields) for row in csv_rows[:2]]
+    assert excerpt == [
+        (section, "D1", "tardío", "60", "verificado", "exitoso", "0"),
+        (section, "D2", "sin_plazo", "0", "verificado", "exitoso", "0"),
+    ]
