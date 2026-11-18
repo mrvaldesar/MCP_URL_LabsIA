@@ -1,0 +1,237 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "tools": [
+      {
+        "name": "register_team",
+        "description": "Registra el equipo y confirma el registro.\n\n    El cliente HTTP recibe la credencial por separado. El agente no lee ni\n    escribe archivos .env ni guarda el token en el repositorio.\n    ",
+        "inputSchema": {
+          "$defs": {
+            "Member": {
+              "additionalProperties": false,
+              "properties": {
+                "github_user": {
+                  "maxLength": 39,
+                  "pattern": "^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$",
+                  "title": "Github User",
+                  "type": "string"
+                },
+                "carnet": {
+                  "maxLength": 64,
+                  "title": "Carnet",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "github_user",
+                "carnet"
+              ],
+              "title": "Member",
+              "type": "object"
+            }
+          },
+          "properties": {
+            "team_name": {
+              "title": "Team Name",
+              "type": "string"
+            },
+            "section": {
+              "enum": [
+                "01",
+                "02"
+              ],
+              "title": "Section",
+              "type": "string"
+            },
+            "modality": {
+              "enum": [
+                "individual",
+                "pareja",
+                "trio"
+              ],
+              "title": "Modality",
+              "type": "string"
+            },
+            "members": {
+              "items": {
+                "$ref": "#/$defs/Member"
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "title": "Members",
+              "type": "array"
+            },
+            "github_repository": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Github Repository"
+            }
+          },
+          "required": [
+            "team_name",
+            "section",
+            "modality",
+            "members"
+          ],
+          "title": "register_teamArguments",
+          "type": "object"
+        },
+        "outputSchema": {
+          "properties": {
+            "result": {
+              "title": "Result",
+              "type": "string"
+            }
+          },
+          "required": [
+            "result"
+          ],
+          "title": "register_teamOutput",
+          "type": "object"
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false
+        }
+      },
+      {
+        "name": "submit_lab_results",
+        "description": "Registra métricas y estado de CI declarados y retorna un recibo.\n\n    El cliente MCP envía el token en Authorization: Bearer. El agente no lee\n    ni escribe archivos .env. El recibo confirma la recepción de los datos.\n    ",
+        "inputSchema": {
+          "properties": {
+            "deliverable_id": {
+              "enum": [
+                "D1",
+                "D2",
+                "D3",
+                "D4",
+                "D5",
+                "D6",
+                "D7",
+                "D8",
+                "D9",
+                "D10"
+              ],
+              "title": "Deliverable Id",
+              "type": "string"
+            },
+            "commit_hash": {
+              "pattern": "^[0-9a-f]{7,40}$",
+              "title": "Commit Hash",
+              "type": "string"
+            },
+            "metrics_json": {
+              "description": "Métricas declaradas por el equipo en JSON. Límite estricto de 64 KiB (65536 bytes) en UTF-8.",
+              "maxLength": 65536,
+              "title": "Metrics Json",
+              "type": "string"
+            },
+            "is_ci_passing": {
+              "description": "Estado de CI declarado por el equipo.",
+              "title": "Is Ci Passing",
+              "type": "boolean"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Etiqueta de GitHub. Por defecto usa deliverable_id.",
+              "title": "Label"
+            }
+          },
+          "required": [
+            "deliverable_id",
+            "commit_hash",
+            "metrics_json",
+            "is_ci_passing"
+          ],
+          "title": "submit_lab_resultsArguments",
+          "type": "object"
+        },
+        "outputSchema": {
+          "properties": {
+            "receipt_id": {
+              "title": "Receipt Id",
+              "type": "integer"
+            },
+            "deliverable_id": {
+              "title": "Deliverable Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "received_at_utc": {
+              "title": "Received At Utc",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "attempt": {
+              "title": "Attempt",
+              "type": "integer"
+            },
+            "section": {
+              "title": "Section",
+              "type": "string"
+            },
+            "verification_status": {
+              "title": "Verification Status",
+              "type": "string"
+            },
+            "verified_ci_status": {
+              "title": "Verified Ci Status",
+              "type": "string"
+            },
+            "timing": {
+              "title": "Timing",
+              "type": "string"
+            },
+            "late_minutes": {
+              "title": "Late Minutes",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "receipt_id",
+            "deliverable_id",
+            "label",
+            "received_at_utc",
+            "status",
+            "attempt",
+            "section",
+            "verification_status",
+            "verified_ci_status",
+            "timing",
+            "late_minutes"
+          ],
+          "title": "Receipt",
+          "type": "object"
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false
+        }
+      }
+    ]
+  }
+}

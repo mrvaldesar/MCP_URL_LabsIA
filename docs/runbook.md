@@ -144,3 +144,49 @@ python -m pip install -r requirements.txt
 pytest -q
 pytest --cov
 ```
+
+## Configurar credenciales y proxy
+
+Usa un token de grano fino del propietario de la organización del curso, limitado a los repositorios asignados. Otorga lectura de **Contents**, **Checks** y **Commit statuses**. La consulta de colaboradores es opcional y depende de los permisos de repositorio. Si faltan, el registro conserva su resultado. Guarda el token en el gestor de secretos como `GITHUB_API_TOKEN`. Configura una vigencia de 30 días o el máximo inferior que imponga la organización, registra la fecha efectiva de expiración en el gestor y programa la rotación siete días antes. Para una GitHub App, la credencial equivalente es un token de instalación. El proceso actual lee un valor estático del entorno y requiere un mecanismo externo de renovación para usar esa opción.
+
+Comprueba `GET /admin/github/health` en preproducción después de instalar o rotar la credencial. `valida` confirma que se puede listar al menos un repositorio privado del curso. `invalida` indica HTTP 401. `acceso_privado_no_confirmado` indica que no se confirmó visibilidad privada. Verifica el permiso **Contents** con una entrega sintética de un repositorio piloto.
+
+Genera un token aleatorio de 32 bytes por docente en el gestor de secretos y configura en `TEACHER_ADMIN_CREDENTIALS` una lista de objetos `{"id":"docente-01","section":"01","sha256":"<64 dígitos hexadecimales>"}`. Usa `"section":null` para alcance general. Distribuye el valor original al docente por el canal privado acordado. La variable del servidor contiene los hashes. Para revocar, elimina la entrada y actualiza el entorno del servicio. Restringe y retén el archivo de auditoría en el disco persistente.
+
+El arranque del Grader desactiva el procesamiento de proxy de Uvicorn. Configura `TRUSTED_PROXY_CIDRS` con las redes del proxy que realmente entrega la conexión TCP. Restringe el acceso al backend a ese proxy. El proxy de borde debe eliminar el `X-Forwarded-For` externo y escribir o adjuntar las direcciones que observó. El Grader recorre la cadena de derecha a izquierda y se detiene en el primer salto sin confianza. Si el peer directo está fuera de las redes configuradas, el Grader usa su IP y descarta el encabezado. En el hosting de preproducción verifica una petición desde una IP conocida, otra con un encabezado falsificado y la existencia de una ruta de red restringida al backend. Los rangos dependen del proveedor y del despliegue.
+
+## Equipos, ventanas y recibos pendientes
+
+- `GET /admin/teams` lista el alcance de la credencial. `?section=01` lo reduce a una sección.
+- `PATCH /admin/teams/{id}/assignment` recibe `{"github_repository":"lab-ia-s01-uno"}` para corregir un repositorio. Para trasladar un equipo con repositorio asignado, envía `{"section":"02","github_repository":"lab-ia-s02-uno"}` con una credencial de alcance general. El historial queda en la sección original.
+- `PUT /admin/windows` recibe `{"section":"01","deliverable_id":"D2","opens_at":"2026-11-18T08:00:00-06:00","closes_at":"2026-11-18T18:00:00-06:00"}`. Para reabrir, vuelve a enviar la ventana con apertura y cierre nuevos. Antes de abrir o si no hay ventana, el recibo se marca `sin_plazo`. El cierre es inclusivo y el tiempo posterior se marca `tardío`, con minutos redondeados hacia arriba. Se usa el instante de recepción previo a consultar GitHub. Cambiar una ventana afecta los recibos que se creen posteriormente.
+- Filtra el CSV por `verification_status=pendiente` y llama `POST /admin/submissions/{id}/retry-verification` por recibo. HTTP 202 indica que sigue pendiente. HTTP 200 registra `verificado` o `inconsistente`. El intento y la fecha originales permanecen en el mismo recibo.
+
+## Copia externa programada
+
+Instala AWS CLI en un proceso que pueda leer el volumen persistente. Usa un bucket S3 privado, con bloqueo de acceso público, retención según la política del curso y permisos de escritura limitados al prefijo de copia. Separa el permiso de lectura y restauración. El script crea una copia SQLite consistente incluso con WAL, comprueba integridad y referencias, y solicita cifrado AES256 del objeto.
+
+Programa una copia cada hora y una copia antes de cada actualización. Ejemplo de cron en un host con el volumen montado, ajustando las rutas y el bucket:
+
+```cron
+17 * * * * cd /srv/grader && /srv/grader/.venv/bin/python -m tools.backup_db backup --db /srv/grader/data/grader.db --destination s3://BUCKET-PRIVADO/grader
+```
+
+Supervisa códigos de salida y antigüedad del último objeto. La frecuencia horaria supone hasta una hora de pérdida de recibos si falla el volumen y las copias están al día.
+
+Para ensayar, restaura a un archivo nuevo de un entorno aislado:
+
+```bash
+python -m tools.backup_db restore --source s3://BUCKET-PRIVADO/grader/OBJETO.db --target staging/restaurado.db
+python -m tools.export_section 01 --db staging/restaurado.db > staging/seccion-01.csv
+```
+
+El destino y su directorio deben estar en un filesystem que admita enlaces duros. El directorio debe existir. Para instalar la copia en el servicio, sigue el procedimiento de restauración anterior y verifica también la sección 02. La prueba automatizada usa datos sintéticos, SQLite real y una transferencia S3 simulada.
+
+## Actualización y reversión
+
+1. Consulta el calendario de ambas secciones y el estado de las recepciones activas. Programa la actualización fuera de las ventanas, anuncia el mantenimiento y pausa el despliegue automático si corresponde.
+2. Prueba la imagen y una restauración en preproducción. En el servicio, drena las solicitudes en curso, detén las escrituras y crea una última copia externa.
+3. Arranca la nueva versión sobre el volumen persistente. El arranque aplica las migraciones 001 a 006 en orden, solo si faltan. Las nuevas son `004_github_verification.sql`, `005_delivery_windows.sql` y `006_submission_team_snapshot.sql`.
+4. Verifica `/health`, `tools/list`, el CSV de ambas secciones y el acceso de GitHub. Mantén una réplica activa antes de reabrir. Configura el monitor según la sección de arranque en frío.
+5. Para revertir, pausa el tráfico, conserva una copia de la base posterior a la actualización, restaura la copia anterior y arranca el código anterior. Esta reversión restaura los recibos hasta la toma de esa copia. Concilia con las etiquetas oficiales cualquier recibo posterior antes de reabrir el servicio.

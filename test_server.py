@@ -938,3 +938,68 @@ def test_backup_cli_s3_arguments_and_transfer(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["backup_db", "backup", "--destination", "s3://example"])
     backup_db.main()
     assert capsys.readouterr().out.strip() == "s3://example/snapshot.db"
+
+
+def test_reference_matches_live_tools_list(client, capsys):
+    from pathlib import Path
+    from tools.generate_tool_reference import main
+
+    reference = Path(__file__).with_name("docs") / "tools-list.json"
+    expected = json.loads(reference.read_text())
+    assert rpc(client, "tools/list").json() == expected
+    main()
+    assert json.loads(capsys.readouterr().out) == expected
+
+
+def test_streamable_http_over_tcp(grader_db):
+    import socket
+    from threading import Thread
+    from time import monotonic, sleep
+
+    import uvicorn
+
+    app = create_server().streamable_http_app()
+    server = uvicorn.Server(uvicorn.Config(app, proxy_headers=False, log_level="error"))
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        thread = Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+        thread.start()
+        try:
+            deadline = monotonic() + 5
+            while not server.started and thread.is_alive() and monotonic() < deadline:
+                sleep(0.01)
+            assert server.started
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False) as client:
+                assert client.get("/health").status_code == 200
+                listed = rpc(client, "tools/list")
+                assert {item["name"] for item in listed.json()["result"]["tools"]} == {
+                    "register_team", "submit_lab_results",
+                }
+                registered = register(client, "Equipo HTTP", [MEMBER])
+                assert registered.headers.get("X-Team-Token")
+                assert "X-Team-Token" not in registered.text
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("section", ["01", "02"])
+def test_delivery_matrix_http(client, grader_db, section):
+    token = register(client, "Equipo matriz", [MEMBER], section=section).headers["X-Team-Token"]
+    assign_repository(grader_db)
+    expected = {
+        "D1": "verificado", "D2": "Etiqueta no encontrada", "D3": "pendiente",
+        "D4": "pendiente", "D5": "apunta a otro commit", "D6": "verificado",
+        "D7": "pendiente", "D8": "pendiente", "D9": "pendiente", "D10": "pendiente",
+    }
+    for deliverable, outcome in expected.items():
+        result = submit(client, token, deliverable_id=deliverable, label=deliverable).json()["result"]
+        if outcome in ("verificado", "pendiente"):
+            receipt = result["structuredContent"]
+            assert receipt["section"] == section
+            assert receipt["deliverable_id"] == deliverable
+            assert receipt["verification_status"] == outcome
+        else:
+            assert result["isError"] and outcome in result["content"][0]["text"]

@@ -43,40 +43,19 @@ La capa gratuita de Render suspende servicios inactivos. En Railway, el servicio
 
 ### Verificación de entregas en GitHub
 
-Configura `GITHUB_COURSE_ORG` con el nombre de la organización del curso y
-`GITHUB_API_TOKEN` con un token del servidor que tenga acceso de lectura a
-**Contents** en los repositorios de los equipos. Carga el token desde el gestor
-de secretos. En Docker, pasa ambas variables con
-`-e GITHUB_COURSE_ORG -e GITHUB_API_TOKEN`.
+La etiqueta publicada en GitHub es la entrega oficial. El servidor registra el recibo. Usa una organización para las dos secciones y un repositorio privado por equipo, con nombre corto `lab-ia-s01-<equipo>` o `lab-ia-s02-<equipo>`. Incluye `github_repository` al registrarte. Los clientes existentes pueden omitirlo y el docente puede asignarlo antes de la primera entrega con `PATCH /admin/teams/{id}/assignment`.
 
-Después del registro, el operador asigna a cada equipo su repositorio en la
-base de datos persistente. Guarda solo el nombre del repositorio dentro de la
-organización configurada. Por ejemplo, para asignar `equipo-42` al equipo con
-ID `42` después de que el servidor aplique las migraciones:
-
-```bash
-sqlite3 -bail data/grader.db <<'SQL'
-SELECT id, team_name, section, github_repository FROM teams ORDER BY id;
-SQL
-
-sqlite3 -bail data/grader.db <<'SQL'
-UPDATE teams SET github_repository = 'equipo-42' WHERE id = 42;
-SELECT id, github_repository FROM teams WHERE id = 42;
-SQL
-```
-
-Cada repositorio puede pertenecer a un solo equipo. Los equipos existentes
-también requieren una asignación antes de enviar nuevas entregas.
+Una indisponibilidad de GitHub durante la entrega genera un recibo con `verification_status=pendiente`. Conserva el recibo para que el docente pueda reintentar la verificación. El CSV incluye el CI declarado y `verified_ci_status`, que refleja la consulta a GitHub al verificar el recibo.
 
 ## 🤖 Uso para los estudiantes
 
 **Antes de conectar el LLM, ejecuta manualmente `curl -i` en tu terminal** con el ejemplo de registro de abajo. El servidor devuelve `X-Team-Token` una sola vez como encabezado HTTP. El agente puede mostrar solo la confirmación MCP y perder el token si realiza el registro por ti.
 
-1. En la solicitud de `register_team`, usa la sección `01` o `02` y proporciona uno, dos o tres integrantes según la modalidad `individual`, `pareja` o `trio`. Cada integrante requiere `github_user` y un `carnet` de siete dígitos.
+1. En la solicitud de `register_team`, usa la sección `01` o `02` y proporciona uno, dos o tres integrantes según la modalidad `individual`, `pareja` o `trio`. Cada integrante requiere `github_user` y un `carnet` como texto en el formato del curso (siete dígitos por defecto) y debe aparecer en el padrón de su sección.
 2. Guarda el valor de `X-Team-Token` en privado. Configura el cliente MCP para conectarse a `/mcp` mediante Streamable HTTP con el encabezado `Authorization: Bearer <token>`. Conecta el LLM después de configurar la credencial.
-3. Llama a `submit_lab_results(deliverable_id, label, commit_hash, metrics_json, is_ci_passing)`. El identificador va de `D1` a `D10`, el commit usa entre 7 y 40 dígitos hexadecimales en minúscula y las métricas se envían como una cadena JSON válida de hasta 64 KiB en UTF-8. Publica en el repositorio asignado una etiqueta Git `label` idéntica a `deliverable_id` (por ejemplo, `D1`) antes de enviar. GitHub debe resolver el hash declarado al mismo commit al que apunta la etiqueta. Las métricas y el estado de CI siguen siendo declaraciones del equipo.
+3. Llama a `submit_lab_results` con `deliverable_id`, `commit_hash`, `metrics_json` e `is_ci_passing`. El argumento opcional `label` usa `deliverable_id` por defecto. El identificador va de `D1` a `D10`, el commit usa entre 7 y 40 dígitos hexadecimales en minúscula y las métricas se envían como una cadena JSON válida de hasta 64 KiB en UTF-8. Publica en el repositorio asignado una etiqueta Git `label` idéntica a `deliverable_id` (por ejemplo, `D1`) antes de enviar. GitHub debe resolver el hash declarado al mismo commit al que apunta la etiqueta. Las métricas y el estado de CI siguen siendo declaraciones del equipo.
 
-El recibo incluye `receipt_id`, `deliverable_id`, `label`, `received_at_utc`, `status`, `attempt` y `section`. Las métricas y el estado de CI son declaraciones del equipo. El estado `received` confirma la recepción.
+El recibo incluye el ID, el instante UTC, el intento, la sección, la verificación, el CI verificado y la puntualidad. El estado `received` confirma la recepción. Las entregas tardías se aceptan y quedan marcadas.
 
 Usa la URL HTTPS del curso en lugar de `http://localhost:8000` para el registro remoto.
 
@@ -84,12 +63,12 @@ Usa la URL HTTPS del curso en lugar de `http://localhost:8000` para el registro 
 curl -i http://localhost:8000/mcp \
   -H 'Accept: application/json, text/event-stream' \
   -H 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"register_team","arguments":{"team_name":"Equipo Uno","section":"01","modality":"individual","members":[{"github_user":"alumna-uno","carnet":"1234524"}]}}}'
+  --data '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"register_team","arguments":{"team_name":"Equipo Uno","section":"01","modality":"individual","github_repository":"lab-ia-s01-uno","members":[{"github_user":"alumna-uno","carnet":"1234524"}]}}}'
 ```
 
 ## Operación docente
 
-Configura `ADMIN_TOKEN` en el entorno del servidor con una credencial independiente de los tokens de equipo. En Docker, añade `-e ADMIN_TOKEN` al comando de arranque para pasar la variable desde el entorno del operador. Las rutas administrativas reciben `Authorization: Bearer <ADMIN_TOKEN>`.
+Configura `ADMIN_TOKEN` en el entorno del servidor con una credencial independiente de los tokens de equipo. En Docker, añade `-e ADMIN_TOKEN` al comando de arranque para pasar la variable desde el entorno del operador. Las rutas administrativas reciben `Authorization: Bearer <token>`. `ADMIN_TOKEN` conserva acceso a todas las secciones. Configura credenciales individuales con `TEACHER_ADMIN_CREDENTIALS`. El log registra el docente, la acción, el recurso y el resultado.
 
 | Ruta | Operación |
 | --- | --- |
@@ -97,6 +76,11 @@ Configura `ADMIN_TOKEN` en el entorno del servidor con una credencial independie
 | `POST /admin/teams/{id}/rotate-token` | Invalida la credencial anterior y entrega la nueva en `X-Team-Token`. El ID del equipo aparece en el CSV. |
 | `POST /admin/teams/{id}/update` | Actualiza los integrantes o la modalidad y entrega una credencial nueva en `X-Team-Token`. |
 | `GET /admin/export?section=01` | Descarga los envíos de la sección indicada como CSV. |
+| `GET /admin/teams[?section=01]` | Lista los equipos a los que tiene acceso el docente. |
+| `PATCH /admin/teams/{id}/assignment` | Corrige el repositorio, cambia la sección o actualiza ambos en una operación. |
+| `PUT /admin/windows` | Configura o reabre una ventana de entrega por sección y entregable. |
+| `POST /admin/submissions/{id}/retry-verification` | Reintenta la verificación de un recibo pendiente. |
+| `GET /admin/github/health` | Comprueba si la credencial permite listar repositorios privados de la organización. |
 | `POST /admin/roster` | Reemplaza el padrón de una sección con un JSON que contiene `section` y `members`. |
 
 Ejemplo de cuerpo para el padrón:
@@ -105,14 +89,38 @@ Ejemplo de cuerpo para el padrón:
 {"section":"01","members":[{"github_user":"alumna-uno","carnet":"1234524"}]}
 ```
 
-Configura `STRICT_ROSTER=true` para exigir que el usuario GitHub y el carné de cada integrante coincidan con una misma entrada del padrón de su sección. El modo predeterminado permite registros fuera del padrón y deja una advertencia en el log.
+Carga el padrón de ambas secciones antes de abrir el registro. Por defecto se exige que el usuario GitHub y el carné de cada integrante coincidan con la misma entrada del padrón de su sección. El servidor avisa al arrancar si el padrón está vacío.
 
 Para actualizar un equipo, envía `members` con la lista completa de integrantes, `modality` o ambos campos. Si envías solo `members`, la modalidad se deduce de la cantidad de integrantes. Si envías solo `modality`, debe corresponder a la cantidad de integrantes que ya tiene el equipo. Una actualización exitosa invalida la credencial anterior.
 
-El servidor permite hasta cinco registros por IP en diez minutos y hasta diez llamadas a `submit_lab_results` por token de equipo en un minuto. Cuenta las solicitudes en ventanas móviles en memoria. Cada proceso mantiene su propio conteo y lo reinicia al arrancar. Aplica las migraciones al arrancar y escribe logs JSON en `grader.log` en local y en `/app/data/grader.log` en Docker. Configura `GRADER_LOG_PATH` para cambiar la ruta, por ejemplo a `/app/data/grader.log` para usar el volumen persistente de Docker.
+### Configuración
+
+| Variable | Valor predeterminado | Efecto |
+| --- | --- | --- |
+| `STRICT_ROSTER` | Activo | Solo se desactiva con `false`, `0`, `off` o `no`. |
+| `CARNET_PATTERN` | `^[0-9]{7}$` | Expresión regular Python aplicada al carné completo en registros y padrón, con un máximo de 64 caracteres. |
+| `REGISTER_IP_LIMIT` | `80` | Intentos de registro por IP. Permite 64 equipos en una red compartida y 16 intentos adicionales. |
+| `REGISTER_WINDOW_SECONDS` | `600` | Ventana móvil común de los límites de registro. |
+| `REGISTER_GLOBAL_LIMIT` | `256` | Intentos totales por proceso en la ventana, cuatro veces el tamaño esperado de la cohorte. |
+| `REGISTER_CARNET_FAILURE_LIMIT` | `5` | Intentos sin coincidencia en el padrón estricto antes de limitar ese carné durante la ventana. |
+| `TRUSTED_PROXY_CIDRS` | Vacío | Redes de proxies autorizados a proporcionar `X-Forwarded-For`, separadas por comas. |
+| `TEACHER_ADMIN_CREDENTIALS` | `[]` | Lista JSON de docentes con identificador, sección y SHA-256 de su token. |
+| `GITHUB_COURSE_ORG` | Vacío | Organización única del curso. |
+| `GITHUB_API_TOKEN` | Vacío | Credencial del servidor para repositorios privados, almacenada en el gestor de secretos. |
+| `ADMIN_TOKEN` | Sin configurar | Credencial de superadministración. |
+| `GRADER_LOG_PATH` | `grader.log` local, `/app/data/grader.log` en Docker | Ruta del log de auditoría. |
+
+Los límites viven en la memoria de cada proceso. Ejecuta una réplica. Los envíos conservan el límite de diez llamadas por token cada minuto.
 
 Para exportar desde una copia local de la base, ejecuta desde la raíz del repositorio:
 
 ```bash
 python -m tools.export_section 01 --db data/grader.db > seccion-01.csv
 ```
+
+
+## Referencia MCP
+
+El [JSON de tools/list](docs/tools-list.json) se genera desde el servidor local con `python -m tools.generate_tool_reference > docs/tools-list.json`. Las firmas publicadas se mantienen estables durante el semestre. Una prueba compara la referencia con la respuesta HTTP del servidor.
+
+Consulta el [runbook](docs/runbook.md) para configurar el proxy, las credenciales, las ventanas, el respaldo y el procedimiento de actualización.
