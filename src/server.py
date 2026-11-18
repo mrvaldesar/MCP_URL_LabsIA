@@ -7,11 +7,13 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 
 from src.admin import ROUTES
 from src.audit import AuditMiddleware, audit_log, logger
 from src.auth import TeamAuthMiddleware
-from src.database import Receipt, init_db, register_team_db, save_submission_db
+from src.database import Receipt, get_team_repository, init_db, register_team_db, save_submission_db
+from src.github import verify_submission
 from src.models import Member, Section
 
 DELIVERABLE_PATTERN = r"^D([1-9]|10)$"
@@ -82,7 +84,7 @@ def _reject_non_json_constant(value: str):
     raise ValueError(f"Constante JSON inválida: {value}")
 
 
-def submit_lab_results(
+async def submit_lab_results(
     deliverable_id: DeliverableId,
     label: str,
     commit_hash: Annotated[str, Field(pattern=COMMIT_PATTERN)],
@@ -115,7 +117,15 @@ def submit_lab_results(
         raise ValueError("metrics_json debe ser un JSON válido.") from None
 
     try:
-        return save_submission_db(team_id, deliverable_id, label, commit_hash, metrics_json, is_ci_passing)
+        repository = await run_in_threadpool(get_team_repository, team_id)
+        if repository is None:
+            raise ValueError("El equipo no tiene un repositorio de GitHub asignado. Avisa al docente.")
+        verified_sha = await verify_submission(repository, label, commit_hash)
+        return await run_in_threadpool(
+            save_submission_db, team_id, deliverable_id, label, verified_sha, metrics_json, is_ci_passing, repository
+        )
+    except ValueError:
+        raise
     except Exception:
         logger.exception("Falló el almacenamiento del envío")
         raise ValueError("Error interno del servidor.") from None
