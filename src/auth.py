@@ -1,22 +1,44 @@
 import json
 import re
+from hashlib import sha256
 
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers, MutableHeaders
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from src.database import registration_retry_after, resolve_team_id
+from src.database import resolve_team_id
+from src.rate_limit import SlidingWindow
 
 TOKEN_PATTERN = re.compile(r"(?:[0-9a-f]{32}\.[0-9a-f]{64}|[0-9a-f]{32})")
 PUBLIC_METHODS = ("initialize", "notifications/initialized", "tools/list", "ping")
 MAX_REQUEST_BYTES = 1024 * 1024
 
 
+def rate_limit_response(request: dict, retry_after: int, *, registration: bool = False) -> Response:
+    message = f"Has excedido el límite de peticiones. Por favor, espera {retry_after} segundos antes de reintentar"
+    headers = {"Retry-After": str(retry_after)}
+    envelope = {"jsonrpc": "2.0", "id": request.get("id")}
+    if registration:
+        return JSONResponse(
+            {**envelope, "error": {"code": -32000, "message": message}},
+            status_code=429,
+            headers=headers,
+        )
+    if "id" not in request:
+        return Response(status_code=202, headers=headers)
+    return JSONResponse(
+        {**envelope, "result": {"isError": True, "content": [{"type": "text", "text": message}]}},
+        headers=headers,
+    )
+
+
 class TeamAuthMiddleware:
     def __init__(self, app: ASGIApp, path: str):
         self.app = app
         self.path = path
+        self.registration_limit = SlidingWindow(limit=5, seconds=600)
+        self.submission_limit = SlidingWindow(limit=10, seconds=60)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] != "http" or scope["path"] != self.path or scope["method"] != "POST":
@@ -44,23 +66,15 @@ class TeamAuthMiddleware:
         request = payload if isinstance(payload, dict) else {}
         method = request.get("method")
         params = request.get("params")
-        registration = (
-            method == "tools/call"
-            and isinstance(params, dict)
-            and params.get("name") == "register_team"
-        )
+        tool = params.get("name") if method == "tools/call" and isinstance(params, dict) else None
+        registration = tool == "register_team"
 
         if registration:
             client = scope.get("client")
             ip = client[0] if client else "unknown"
-            retry_after = await run_in_threadpool(registration_retry_after, ip)
+            retry_after = self.registration_limit.retry_after(ip)
             if retry_after is not None:
-                response = JSONResponse(
-                    {"error": "Límite de registros alcanzado. Vuelve a intentarlo más tarde."},
-                    status_code=429,
-                    headers={"Retry-After": str(retry_after)},
-                )
-                await response(scope, receive, send)
+                await rate_limit_response(request, retry_after, registration=True)(scope, receive, send)
                 return
 
         state = scope.setdefault("state", {})
@@ -68,7 +82,14 @@ class TeamAuthMiddleware:
             authorization = Headers(scope=scope).get("authorization", "")
             scheme, _, token = authorization.partition(" ")
             team_id = None
+            submission_key = None
             if scheme.lower() == "bearer" and TOKEN_PATTERN.fullmatch(token):
+                if tool == "submit_lab_results":
+                    submission_key = sha256(token.encode("ascii")).hexdigest()
+                    retry_after = self.submission_limit.retry_after(submission_key, consume=False)
+                    if retry_after is not None:
+                        await rate_limit_response(request, retry_after)(scope, receive, send)
+                        return
                 team_id = await run_in_threadpool(resolve_team_id, token)
             if team_id is None:
                 response = JSONResponse(
@@ -78,6 +99,12 @@ class TeamAuthMiddleware:
                 )
                 await response(scope, receive, send)
                 return
+            if submission_key is not None:
+                # Recheck atomically after authentication before forwarding the call.
+                retry_after = self.submission_limit.retry_after(submission_key)
+                if retry_after is not None:
+                    await rate_limit_response(request, retry_after)(scope, receive, send)
+                    return
             state["team_id"] = team_id
 
         # FastMCP receives the identity and the replayed request without the credential.

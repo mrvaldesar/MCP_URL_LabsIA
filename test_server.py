@@ -9,7 +9,7 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from src import database, github
+from src import database, github, rate_limit
 from src.server import create_server
 
 
@@ -220,7 +220,9 @@ def test_teacher_routes_and_audit(client, grader_db):
     assert all(json.loads(line)["timestamp"] for line in log.splitlines())
 
 
-def test_register_team_limit_is_per_ip_and_only_applies_to_registration(client):
+def test_register_team_limit_is_per_ip_and_only_applies_to_registration(client, monkeypatch):
+    now = 1000
+    monkeypatch.setattr(rate_limit, "monotonic", lambda: now)
     for index in range(5):
         response = register(client, f"Equipo {index}", [{
             "github_user": f"alumna-{index}", "carnet": str(1234520 + index),
@@ -228,8 +230,16 @@ def test_register_team_limit_is_per_ip_and_only_applies_to_registration(client):
         assert response.status_code == 200
     rejected = register(client, "Otro equipo", [MEMBER])
     assert rejected.status_code == 429
-    assert int(rejected.headers["Retry-After"]) in range(1, 61)
+    assert rejected.headers["Retry-After"] == "600"
+    assert rejected.json()["error"]["message"] == (
+        "Has excedido el límite de peticiones. Por favor, espera 600 segundos antes de reintentar"
+    )
     assert rpc(client, "tools/list").status_code == 200
+    now += 599
+    assert register(client, "Otro equipo", [MEMBER]).headers["Retry-After"] == "1"
+    now += 1
+    new_member = {"github_user": "otra-alumna", "carnet": "1234999"}
+    assert register(client, "Otro equipo", [new_member]).headers.get("X-Team-Token")
 
 
 def test_sql_migrations_run_once(grader_db):
@@ -399,3 +409,40 @@ def test_github_verification_requires_assigned_repository(client, grader_db, git
     assert github_api == []
     with closing(sqlite3.connect(grader_db)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM submissions").fetchone() == (0,)
+
+
+def test_submission_limit_blocks_eleventh_call_per_token(client, grader_db, github_api, monkeypatch):
+    now = 1000
+    monkeypatch.setattr(rate_limit, "monotonic", lambda: now)
+    first_token = register(client, "Primer equipo", [MEMBER]).headers["X-Team-Token"]
+    second_token = register(client, "Segundo equipo", [
+        {"github_user": "otra-alumna", "carnet": "1234999"},
+    ]).headers["X-Team-Token"]
+    assign_repository(grader_db)
+    assign_repository(grader_db, team_id=2)
+
+    for attempt in range(1, 11):
+        result = submit(client, first_token).json()["result"]
+        assert result["structuredContent"]["attempt"] == attempt
+
+    github_calls = len(github_api)
+    rejected = submit(client, first_token)
+    assert rejected.status_code == 200
+    assert rejected.headers["Retry-After"] == "60"
+    assert rejected.json() == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"isError": True, "content": [{
+            "type": "text",
+            "text": "Has excedido el límite de peticiones. Por favor, espera 60 segundos antes de reintentar",
+        }]},
+    }
+    assert len(github_api) == github_calls
+    with closing(sqlite3.connect(grader_db)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM submissions").fetchone() == (10,)
+
+    assert submit(client, second_token).json()["result"]["structuredContent"]["attempt"] == 1
+    now += 59
+    assert submit(client, first_token).headers["Retry-After"] == "1"
+    now += 1
+    assert submit(client, first_token).json()["result"]["structuredContent"]["attempt"] == 11
