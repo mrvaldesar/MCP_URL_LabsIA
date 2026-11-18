@@ -1,12 +1,16 @@
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypedDict
+
+from src.audit import logger
+from src.models import TEAM_SIZES, Modality, validate_team_size
 
 DB_PATH = "data/grader.db"
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
@@ -56,9 +60,13 @@ def init_db():
             raise RuntimeError("No se pudo truncar el WAL de SQLite. Cierra las otras conexiones y vuelve a iniciar.")
 
 
+def _migration_files() -> list[Path]:
+    return sorted(path for path in MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql") if path.is_file())
+
+
 def _apply_migrations(conn: sqlite3.Connection):
     conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)")
-    migrations = sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql"))
+    migrations = _migration_files()
     if not migrations:
         raise RuntimeError("No se encontraron las migraciones de SQLite.")
     for path in migrations:
@@ -109,9 +117,38 @@ def _new_token() -> tuple[str, str, str]:
     return token, salt, _token_hash(token, salt)
 
 
-def register_team_db(team_name: str, section: str, modality: str, members: list[dict]) -> str:
+class MemberIdentityConflict(ValueError):
+    pass
+
+
+def _claim_member_identities(conn: sqlite3.Connection, members: list[dict]):
+    try:
+        conn.executemany("""
+            INSERT INTO member_identities (github_user, carnet) VALUES (?, ?)
+        """, ((member.get("github_user"), str(member["carnet"])) for member in members))
+    except sqlite3.IntegrityError as exc:
+        if "UNIQUE constraint failed: member_identities." in str(exc):
+            raise MemberIdentityConflict("Hay un usuario GitHub o carné repetido o ya registrado.") from None
+        raise
+
+
+def _check_roster(conn: sqlite3.Connection, section: str, members: list[dict]) -> int:
+    unmatched = sum(
+        conn.execute("""
+            SELECT 1 FROM roster WHERE section = ? AND github_user = ? AND carnet = ?
+        """, (section, member["github_user"], member["carnet"])).fetchone() is None
+        for member in members
+    )
+    if unmatched and os.getenv("STRICT_ROSTER", "").strip().lower() in {"1", "true", "yes", "on"}:
+        raise ValueError("Cada integrante debe figurar en el padrón de la sección con su usuario GitHub y carné.")
+    return unmatched
+
+
+def register_team_db(team_name: str, section: str, modality: Modality, members: list[dict]) -> str:
     token, salt, token_hash = _new_token()
     with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        unmatched = _check_roster(conn, section, members)
         try:
             conn.execute("""
                 INSERT INTO teams (team_name, token_hash, salt, section, modality, members, created_at)
@@ -124,14 +161,9 @@ def register_team_db(team_name: str, section: str, modality: str, members: list[
             if "UNIQUE constraint failed: teams.team_name" in str(exc):
                 raise ValueError("El nombre del equipo ya está registrado.") from None
             raise
-        try:
-            conn.executemany("""
-                INSERT INTO member_identities (github_user, carnet) VALUES (?, ?)
-            """, ((member["github_user"], member["carnet"]) for member in members))
-        except sqlite3.IntegrityError as exc:
-            if "UNIQUE constraint failed: member_identities." in str(exc):
-                raise ValueError("Hay un usuario GitHub o carné repetido o ya registrado.") from None
-            raise
+        _claim_member_identities(conn, members)
+    if unmatched:
+        logger.warning("Registro fuera del padrón sección=%s integrantes_sin_coincidencia=%d", section, unmatched)
     return token
 
 
@@ -200,6 +232,47 @@ def save_submission_db(
         )
 
 
+def update_team(
+    team_id: int, members: list[dict] | None, modality: Modality | None
+) -> str | None:
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        team = conn.execute("SELECT modality, members FROM teams WHERE id = ?", (team_id,)).fetchone()
+        if team is None:
+            return None
+
+        current_modality, stored_members = team
+        current_members = json.loads(stored_members)
+        replace_members = members is not None
+        if members is None:
+            members = current_members
+            modality = modality or current_modality
+        elif modality is None:
+            modality = next((name for name, size in TEAM_SIZES.items() if size == len(members)), None)
+            if modality is None:
+                raise ValueError("El equipo debe tener entre uno y tres integrantes.")
+        validate_team_size(modality, len(members))
+
+        if replace_members:
+            for member in current_members:
+                # Legacy teams can share a carnet, with a single claim created during migration.
+                conn.execute("""
+                    DELETE FROM member_identities
+                    WHERE carnet = ? AND github_user IS ?
+                      AND (github_user IS NOT NULL OR NOT EXISTS (
+                          SELECT 1 FROM teams AS other, json_each(other.members) AS member
+                          WHERE other.id != ?
+                            AND CAST(json_extract(member.value, '$.carnet') AS TEXT) = member_identities.carnet
+                      ))
+                """, (str(member["carnet"]), member.get("github_user"), team_id))
+            _claim_member_identities(conn, members)
+        token, salt, token_hash = _new_token()
+        conn.execute("""
+            UPDATE teams SET modality = ?, members = ?, salt = ?, token_hash = ? WHERE id = ?
+        """, (modality, json.dumps(members), salt, token_hash, team_id))
+    return token
+
+
 def rotate_team_token(team_id: int) -> str | None:
     token, salt, token_hash = _new_token()
     with _connect() as conn:
@@ -217,6 +290,8 @@ def replace_roster(section: str, members: list[tuple[str, str]]):
         """, ((section, github_user, carnet) for github_user, carnet in members))
 
 
-def check_health():
+def check_health() -> bool:
+    expected = {path.name for path in _migration_files()}
     with _connect() as conn:
-        conn.execute("SELECT name FROM schema_migrations LIMIT 1").fetchone()
+        applied = {name for (name,) in conn.execute("SELECT name FROM schema_migrations")}
+    return bool(expected) and applied == expected

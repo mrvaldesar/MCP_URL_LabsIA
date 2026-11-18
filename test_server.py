@@ -1,12 +1,14 @@
+import asyncio
 import csv
 import io
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import AsyncExitStack, closing
 from datetime import datetime, timedelta
 
 import httpx
 import pytest
+from httpx import AsyncClient
 from starlette.testclient import TestClient
 
 from src import database, github, rate_limit
@@ -59,7 +61,7 @@ def github_api(monkeypatch):
         assert request.headers["Authorization"] == "Bearer github-test-credential"
         parts = request.url.path.split("/")
         assert parts[1:3] == ["repos", "curso"]
-        assert parts[3] in ("equipo-1", "equipo-2")
+        assert parts[3] in {f"equipo-{team_id}" for team_id in range(1, 21)}
         path = parts[4:]
         if path == ["commits", "abc1235"]:
             return httpx.Response(404)
@@ -69,16 +71,16 @@ def github_api(monkeypatch):
             return httpx.Response(200, json={"object": {"type": "commit", "sha": commit_sha}})
         assert path[:3] == ["git", "ref", "tags"]
         label = "/".join(path[3:])
-        if label == "inexistente":
+        if label == "D2":
             return httpx.Response(404)
-        if label == "sin-credencial":
+        if label == "D3":
             return httpx.Response(401)
-        if label == "limite":
+        if label == "D4":
             return httpx.Response(403, headers={"X-RateLimit-Remaining": "0"})
         target = {"type": "commit", "sha": commit_sha}
-        if label == "commit-inexistente":
+        if label == "D5":
             target["sha"] = "abc1235" + "0" * 33
-        if label == "D1/anotada":
+        if label == "D6":
             target = {"type": "tag", "sha": tag_sha}
         return httpx.Response(200, json={"ref": f"refs/tags/{label}", "object": target})
 
@@ -131,7 +133,7 @@ def test_duplicate_member_rolls_back_team_and_identity_claims(client):
 def test_submission_requires_bearer_and_uses_authenticated_section(client, grader_db):
     token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
     arguments = {
-        "deliverable_id": "D1", "label": "primera", "commit_hash": "abc1234",
+        "deliverable_id": "D1", "label": "D1", "commit_hash": "abc1234",
         "metrics_json": "{}", "is_ci_passing": True,
     }
     params = {"name": "submit_lab_results", "arguments": arguments}
@@ -143,10 +145,10 @@ def test_submission_requires_bearer_and_uses_authenticated_section(client, grade
 
     assign_repository(grader_db)
     first = rpc(client, "tools/call", params, token=token).json()["result"]["structuredContent"]
-    arguments.update(label="segunda", is_ci_passing=False)
+    arguments.update(is_ci_passing=False)
     second = rpc(client, "tools/call", params, token=token).json()["result"]["structuredContent"]
     assert first == {
-        "receipt_id": 1, "deliverable_id": "D1", "label": "primera", "section": "02",
+        "receipt_id": 1, "deliverable_id": "D1", "label": "D1", "section": "02",
         "status": "received", "attempt": 1, "received_at_utc": first["received_at_utc"],
     }
     assert datetime.fromisoformat(first["received_at_utc"]).utcoffset() == timedelta(0)
@@ -165,6 +167,8 @@ def test_discovery_annotations_and_oauth_routes(client):
             "readOnlyHint": False, "idempotentHint": False, "destructiveHint": False,
         }
         assert not {"ctx", "team_id", "token"} & tool["inputSchema"]["properties"].keys()
+    submit_schema = next(tool["inputSchema"] for tool in tools if tool["name"] == "submit_lab_results")
+    assert "64 KiB (65536 bytes) en UTF-8" in submit_schema["properties"]["metrics_json"]["description"]
     for path in ("/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/mcp"):
         assert client.get(path).status_code == 404
 
@@ -176,6 +180,19 @@ def test_health_without_authentication(client):
     assert payload.keys() == {"status", "timestamp"}
     assert payload["status"] == "ok"
     assert datetime.fromisoformat(payload["timestamp"]).utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "different"])
+def test_health_rejects_migration_mismatch(client, grader_db, change):
+    with closing(sqlite3.connect(grader_db)) as conn, conn:
+        if change in ("missing", "different"):
+            conn.execute("DELETE FROM schema_migrations WHERE name = '001_initial_schema.sql'")
+        if change in ("extra", "different"):
+            conn.execute("INSERT INTO schema_migrations (name) VALUES ('999_unexpected.sql')")
+
+    response = client.get("/health")
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable"}
 
 
 def test_teacher_routes_and_audit(client, grader_db):
@@ -198,13 +215,16 @@ def test_teacher_routes_and_audit(client, grader_db):
     new_token = rotation.headers["X-Team-Token"]
     assert token != new_token and new_token not in rotation.text
     params = {"name": "submit_lab_results", "arguments": {
-        "deliverable_id": "D1", "label": "=1+1", "commit_hash": "abc1234",
+        "deliverable_id": "D1", "label": "D1", "commit_hash": "abc1234",
         "metrics_json": "{}", "is_ci_passing": True,
     }}
     assert rpc(client, "tools/call", params, token=token).status_code == 401
     assign_repository(grader_db)
     assert rpc(client, "tools/call", params, token=new_token).json()["result"]["isError"] is False
 
+    # Las entregas históricas pueden contener etiquetas ajenas al formato actual.
+    with closing(sqlite3.connect(grader_db)) as conn, conn:
+        conn.execute("UPDATE submissions SET label = ?", ("=1+1",))
     export = client.get("/admin/export?section=02", headers=admin)
     assert export.status_code == 200
     assert export.headers["content-type"].startswith("text/csv")
@@ -215,7 +235,8 @@ def test_teacher_routes_and_audit(client, grader_db):
     assert not list(csv.DictReader(io.StringIO(other.text)))
 
     log = grader_db.with_name("grader.log").read_text()
-    assert "status=403" in log
+    assert "HTTP GET /admin/export status=403" in log
+    assert "section=02" not in log
     assert all(secret not in log for secret in (token, new_token, admin_token))
     assert all(json.loads(line)["timestamp"] for line in log.splitlines())
 
@@ -310,7 +331,7 @@ def test_invalid_registration_creates_no_team(client, grader_db, modality, membe
 
 def submit(client, token, **overrides):
     arguments = {
-        "deliverable_id": "D1", "label": "Revisión de diseño", "commit_hash": "abc1234",
+        "deliverable_id": "D1", "label": "D1", "commit_hash": "abc1234",
         "metrics_json": "{}", "is_ci_passing": True,
     }
     return rpc(client, "tools/call", {
@@ -321,6 +342,7 @@ def submit(client, token, **overrides):
 @pytest.mark.parametrize("overrides", [
     pytest.param({"deliverable_id": "D11"}, id="D11"),
     pytest.param({"commit_hash": "ghijklm"}, id="commit-no-hex"),
+    pytest.param({"commit_hash": "abc1234\n"}, id="commit-con-salto"),
     pytest.param({"metrics_json": json.dumps("x" * 65_536)}, id="metricas-ASCII-grandes"),
     pytest.param({"metrics_json": json.dumps("ñ" * 32_768, ensure_ascii=False)}, id="metricas-UTF8-grandes"),
     pytest.param({"metrics_json": '{"faltante":'}, id="JSON-invalido"),
@@ -332,6 +354,18 @@ def test_invalid_submission_writes_no_receipt(client, grader_db, github_api, ove
     assert github_api == []
     assert response.status_code == 200
     assert response.json()["result"]["isError"] is True
+    with closing(sqlite3.connect(grader_db)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM submissions").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("label", ["D2", "d1", "D10", " D1", "D1 ", "D1\n", ""])
+def test_label_must_match_deliverable_exactly(client, grader_db, github_api, label):
+    token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    assign_repository(grader_db)
+    result = submit(client, token, label=label).json()["result"]
+    assert result["isError"] is True
+    assert "label debe coincidir exactamente con deliverable_id (D1)" in result["content"][0]["text"]
+    assert github_api == []
     with closing(sqlite3.connect(grader_db)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM submissions").fetchone() == (0,)
 
@@ -354,7 +388,7 @@ def test_other_team_token_cannot_write_under_first_team(client, grader_db):
         assert result["structuredContent"]["attempt"] == 1
 
     second = submit(client, second_token).json()["result"]["structuredContent"]
-    assert second["section"] == "02" and second["label"] == "Revisión de diseño"
+    assert second["section"] == "02" and second["label"] == "D1"
     assert second["attempt"] == (1 if result["isError"] else 2)
     with closing(sqlite3.connect(grader_db)) as conn:
         assert conn.execute("SELECT team_id, attempt FROM submissions WHERE team_id = 1").fetchall() == [(1, 1)]
@@ -369,32 +403,32 @@ def test_section_export_cli(client, grader_db, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["export_section", "02", "--db", str(grader_db)])
     main()
     assert [row["label"] for row in csv.DictReader(io.StringIO(capsys.readouterr().out))] == [
-        "Revisión de diseño",
+        "D1",
     ]
 
 
 def test_github_annotated_tag_saves_verified_sha(client, grader_db, github_api):
     token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
     assign_repository(grader_db)
-    result = submit(client, token, label="D1/anotada").json()["result"]
+    result = submit(client, token, deliverable_id="D6", label="D6").json()["result"]
     assert result["isError"] is False
     assert len(github_api) == 3
-    assert github_api[0].url.raw_path.endswith(b"/git/ref/tags/D1%2Fanotada")
+    assert github_api[0].url.raw_path.endswith(b"/git/ref/tags/D6")
     with closing(sqlite3.connect(grader_db)) as conn:
         assert conn.execute("SELECT commit_hash FROM submissions").fetchall() == [("abc1234" + "0" * 33,)]
 
 
 @pytest.mark.parametrize(("label", "commit_hash", "message"), [
-    ("inexistente", "abc1234", "no existe"),
-    ("commit-inexistente", "abc1235", "no existe"),
-    ("sin-credencial", "abc1234", "Falló la autenticación"),
-    ("limite", "abc1234", "Intenta más tarde"),
+    ("D2", "abc1234", "no existe"),
+    ("D5", "abc1235", "no existe"),
+    ("D3", "abc1234", "Falló la autenticación"),
+    ("D4", "abc1234", "Intenta más tarde"),
     ("D1", "deadbee", "apunta a otro commit"),
 ])
 def test_github_rejection_writes_no_receipt(client, grader_db, label, commit_hash, message):
     token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
     assign_repository(grader_db)
-    result = submit(client, token, label=label, commit_hash=commit_hash).json()["result"]
+    result = submit(client, token, deliverable_id=label, label=label, commit_hash=commit_hash).json()["result"]
     assert result["isError"] is True
     assert message in result["content"][0]["text"]
     with closing(sqlite3.connect(grader_db)) as conn:
@@ -446,3 +480,172 @@ def test_submission_limit_blocks_eleventh_call_per_token(client, grader_db, gith
     assert submit(client, first_token).headers["Retry-After"] == "1"
     now += 1
     assert submit(client, first_token).json()["result"]["structuredContent"]["attempt"] == 11
+
+
+@pytest.mark.parametrize("strict", [None, "false", "true"])
+def test_register_checks_roster_tuple_and_section(client, grader_db, monkeypatch, strict):
+    if strict is None:
+        monkeypatch.delenv("STRICT_ROSTER", raising=False)
+    else:
+        monkeypatch.setenv("STRICT_ROSTER", strict)
+
+    other = {"github_user": "alumna-dos", "carnet": "1234624"}
+    database.replace_roster("01", [(MEMBER["github_user"], MEMBER["carnet"])])
+    database.replace_roster("02", [
+        (other["github_user"], other["carnet"]),
+        ("alumna-tres", "1234724"),
+        ("alumna-cuatro", "1234824"),
+    ])
+    wrong_pair = {"github_user": "alumna-tres", "carnet": "1234824"}
+    responses = [
+        register(client, "Tupla incorrecta", [other, wrong_pair], modality="pareja"),
+        register(client, "Sección incorrecta", [MEMBER]),
+    ]
+    for response in responses:
+        assert response.json()["result"]["isError"] is (strict == "true")
+        assert ("X-Team-Token" in response.headers) is (strict != "true")
+    with closing(sqlite3.connect(grader_db)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM teams").fetchone() == ((0 if strict == "true" else 2),)
+
+    log = grader_db.with_name("grader.log").read_text()
+    assert ('"level": "WARNING"' in log and "Registro fuera del padrón" in log) is (strict != "true")
+    if strict == "true":
+        assert "padrón de la sección" in responses[0].json()["result"]["content"][0]["text"]
+        uppercase = MEMBER | {"github_user": MEMBER["github_user"].upper()}
+        assert "X-Team-Token" in register(client, "Válido", [uppercase], section="01").headers
+
+
+def test_admin_update_replaces_members_and_rotates_token(client, grader_db):
+    departed = {"github_user": "alumna-dos", "carnet": "1234624"}
+    old_token = register(client, "Equipo", [MEMBER, departed], modality="pareja").headers["X-Team-Token"]
+    assign_repository(grader_db)
+    path = "/admin/teams/1/update"
+    admin = {"Authorization": "Bearer admin-test-credential"}
+    payload = {"members": [MEMBER]}
+
+    assert client.post(path, json=payload).status_code == 403
+    assert client.post(path, json=payload, headers={"Authorization": f"Bearer {old_token}"}).status_code == 403
+    assert client.post(path, json={"modality": "individual"}, headers=admin).status_code == 400
+    assert client.post("/admin/teams/99/update", json=payload, headers=admin).status_code == 404
+
+    response = client.post(path, json=payload, headers=admin)
+    assert response.status_code == 200
+    assert response.json() == {"team_id": 1}
+    assert response.headers["Cache-Control"] == "no-store"
+    new_token = response.headers["X-Team-Token"]
+    assert new_token != old_token and new_token not in response.text
+    assert submit(client, old_token).status_code == 401
+    assert submit(client, new_token).json()["result"]["isError"] is False
+
+    with closing(sqlite3.connect(grader_db)) as conn:
+        modality, members = conn.execute("SELECT modality, members FROM teams WHERE id = 1").fetchone()
+        assert modality == "individual" and json.loads(members) == [MEMBER]
+        assert conn.execute("SELECT github_user, carnet FROM member_identities").fetchall() == [
+            (MEMBER["github_user"], MEMBER["carnet"]),
+        ]
+    assert "X-Team-Token" in register(client, "Otro equipo", [departed]).headers
+
+
+def test_admin_update_rolls_back_identity_conflict(client, grader_db):
+    other = {"github_user": "alumna-dos", "carnet": "1234624"}
+    old_token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    register(client, "Otro equipo", [other])
+    response = client.post(
+        "/admin/teams/1/update",
+        json={"modality": "pareja", "members": [MEMBER, other]},
+        headers={"Authorization": "Bearer admin-test-credential"},
+    )
+    assert response.status_code == 409
+    assert "X-Team-Token" not in response.headers
+    assert database.resolve_team_id(old_token) == 1
+    with closing(sqlite3.connect(grader_db)) as conn:
+        modality, members = conn.execute("SELECT modality, members FROM teams WHERE id = 1").fetchone()
+        assert modality == "individual" and json.loads(members) == [MEMBER]
+        assert conn.execute("SELECT COUNT(*) FROM member_identities").fetchone() == (2,)
+
+
+
+def test_admin_update_accepts_modality_only(client, grader_db):
+    old_token = register(client, "Equipo", [MEMBER]).headers["X-Team-Token"]
+    with closing(sqlite3.connect(grader_db)) as conn, conn:
+        conn.execute("UPDATE teams SET modality = 'pareja' WHERE id = 1")
+
+    response = client.post(
+        "/admin/teams/1/update",
+        json={"modality": "individual"},
+        headers={"Authorization": "Bearer admin-test-credential"},
+    )
+    assert response.status_code == 200
+    assert database.resolve_team_id(old_token) is None
+    assert database.resolve_team_id(response.headers["X-Team-Token"]) == 1
+    with closing(sqlite3.connect(grader_db)) as conn:
+        modality, members = conn.execute("SELECT modality, members FROM teams WHERE id = 1").fetchone()
+        assert modality == "individual" and json.loads(members) == [MEMBER]
+
+
+
+def test_concurrent_team_registration_and_submission(grader_db, github_api, monkeypatch):
+    monkeypatch.setenv("STRICT_ROSTER", "true")
+    teams = {
+        f"Equipo {number}": {"github_user": f"alumno-{number}", "carnet": f"{number:07d}"}
+        for number in range(1, 21)
+    }
+    database.replace_roster("02", [(member["github_user"], member["carnet"]) for member in teams.values()])
+    app = create_server().streamable_http_app()
+
+    async def run_concurrent_requests():
+        async with app.router.lifespan_context(app), AsyncExitStack() as stack:
+            # Four client IPs keep all registrations within the production limit of five per IP.
+            clients = [
+                await stack.enter_async_context(AsyncClient(
+                    transport=httpx.ASGITransport(app=app, client=(f"192.0.2.{number}", 12345)),
+                    base_url="http://localhost:8000",
+                ))
+                for number in range(1, 5)
+            ]
+            team_clients = dict(zip(teams, clients * 5, strict=True))
+            registrations = await asyncio.gather(*(
+                register(team_clients[name], name, [member]) for name, member in teams.items()
+            ))
+            tokens = {}
+            for name, response in zip(teams, registrations, strict=True):
+                assert response.status_code == 200, response.text
+                assert response.json()["result"]["isError"] is False, response.text
+                tokens[name] = response.headers["X-Team-Token"]
+            assert len(set(tokens.values())) == 20
+
+            # Repository assignment is a prerequisite for accepting submissions.
+            with closing(sqlite3.connect(grader_db)) as conn, conn:
+                conn.execute("UPDATE teams SET github_repository = 'equipo-' || id")
+
+            submissions = await asyncio.gather(*(
+                submit(team_clients[name], token) for name, token in tokens.items()
+            ))
+            receipts = {}
+            for name, response in zip(teams, submissions, strict=True):
+                assert response.status_code == 200, response.text
+                result = response.json()["result"]
+                assert result["isError"] is False, result
+                receipt = result["structuredContent"]
+                assert receipt["status"] == "received"
+                assert receipt["section"] == "02"
+                assert receipt["deliverable_id"] == receipt["label"] == "D1"
+                assert receipt["attempt"] == 1
+                receipts[name] = (receipt["receipt_id"], receipt["received_at_utc"])
+            return receipts
+
+    receipts = asyncio.run(run_concurrent_requests())
+
+    with closing(sqlite3.connect(grader_db)) as conn:
+        assert conn.execute("SELECT COUNT(*), COUNT(DISTINCT team_name) FROM teams").fetchone() == (20, 20)
+        assert conn.execute("SELECT COUNT(*) FROM member_identities").fetchone() == (20,)
+        rows = conn.execute("""
+            SELECT t.team_name, s.id, s.received_at_utc, s.deliverable_id, s.label, s.attempt,
+                   s.commit_hash, s.declared_metrics_json, s.declared_is_ci_passing
+            FROM submissions AS s JOIN teams AS t ON t.id = s.team_id
+        """).fetchall()
+        assert len(rows) == 20
+        assert {row[0]: row[1:3] for row in rows} == receipts
+        assert all(row[3:] == ("D1", "D1", 1, "abc1234" + "0" * 33, "{}", 1) for row in rows)
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert len(github_api) == 40

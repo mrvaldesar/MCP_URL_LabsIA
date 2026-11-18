@@ -20,21 +20,22 @@ from src.audit import AuditMiddleware, audit_log, logger
 from src.auth import TeamAuthMiddleware
 from src.database import Receipt, get_team_repository, init_db, register_team_db, save_submission_db
 from src.github import verify_submission
-from src.models import Member, Section
+from src.models import Member, Modality, Section, validate_team_size
 
-DELIVERABLE_PATTERN = r"^D([1-9]|10)$"
 COMMIT_PATTERN = r"^[0-9a-f]{7,40}$"
 MAX_METRICS_BYTES = 64 * 1024
-TEAM_SIZES = {"individual": 1, "pareja": 2, "trio": 3}
 
 DeliverableId = Literal["D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10"]
 
 
 async def health(request: Request):
     try:
-        await run_in_threadpool(database.check_health)
+        migrations_match = await run_in_threadpool(database.check_health)
     except sqlite3.Error:
         logger.exception("Falló el chequeo de SQLite")
+        return JSONResponse({"status": "unavailable"}, status_code=503)
+    if not migrations_match:
+        logger.warning("Las migraciones aplicadas no coinciden con los archivos del despliegue")
         return JSONResponse({"status": "unavailable"}, status_code=503)
     return JSONResponse({"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()})
 
@@ -66,7 +67,7 @@ class GraderMCP(FastMCP):
 def register_team(
     team_name: str,
     section: Section,
-    modality: Literal["individual", "pareja", "trio"],
+    modality: Modality,
     members: Annotated[list[Member], Field(min_length=1, max_length=3)],
     ctx: Context,
 ) -> str:
@@ -81,8 +82,7 @@ def register_team(
     team_name = team_name.strip()
     if not team_name:
         raise ValueError("El nombre del equipo es obligatorio.")
-    if len(members) != TEAM_SIZES[modality]:
-        raise ValueError(f"La modalidad {modality} requiere {TEAM_SIZES[modality]} integrante(s).")
+    validate_team_size(modality, len(members))
 
     try:
         request.state.issued_team_token = register_team_db(
@@ -102,9 +102,16 @@ def _reject_non_json_constant(value: str):
 
 async def submit_lab_results(
     deliverable_id: DeliverableId,
-    label: str,
+    label: Annotated[str, Field(description="Etiqueta de GitHub que debe coincidir exactamente con deliverable_id.")],
     commit_hash: Annotated[str, Field(pattern=COMMIT_PATTERN)],
-    metrics_json: Annotated[str, Field(max_length=MAX_METRICS_BYTES, description="Métricas declaradas por el equipo.")],
+    metrics_json: Annotated[
+        str,
+        Field(
+            max_length=MAX_METRICS_BYTES,
+            description="Métricas declaradas por el equipo en JSON. Límite estricto de "
+            f"{MAX_METRICS_BYTES // 1024} KiB ({MAX_METRICS_BYTES} bytes) en UTF-8.",
+        ),
+    ],
     is_ci_passing: Annotated[bool, Field(description="Estado de CI declarado por el equipo.")],
     ctx: Context,
 ) -> Receipt:
@@ -118,13 +125,8 @@ async def submit_lab_results(
     if team_id is None:
         raise ValueError("Se requiere un equipo autenticado.")
 
-    if not re.fullmatch(DELIVERABLE_PATTERN, deliverable_id):
-        raise ValueError("deliverable_id debe estar entre D1 y D10.")
-    if not re.fullmatch(COMMIT_PATTERN, commit_hash):
-        raise ValueError("commit_hash debe contener entre 7 y 40 dígitos hexadecimales en minúscula.")
-    label = label.strip()
-    if not label:
-        raise ValueError("label es obligatorio.")
+    if not re.fullmatch(re.escape(deliverable_id), label):
+        raise ValueError(f"label debe coincidir exactamente con deliverable_id ({deliverable_id}).")
     if len(metrics_json.encode("utf-8")) > MAX_METRICS_BYTES:
         raise ValueError(f"metrics_json supera {MAX_METRICS_BYTES} bytes.")
     try:

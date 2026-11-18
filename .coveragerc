@@ -2,6 +2,11 @@
 source =
     src
     tools
+omit =
+    */tests/*
+    */test_*.py
+    */conftest.py
 
 [report]
 show_missing = True
+fail_under = 85

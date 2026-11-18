@@ -17,11 +17,21 @@ curl --fail --silent --show-error "$BASE_URL/health"
 
 Las rutas administrativas devuelven 403 si falta el token de administración o se usa una credencial de estudiante.
 
+## Registro de estudiantes antes de conectar el LLM
+
+Pide a cada equipo que ejecute manualmente el `curl -i` del README contra la URL HTTPS del curso, antes de conectar el LLM. El registro devuelve `X-Team-Token` una sola vez en los encabezados HTTP. Si el agente realiza el registro, puede mostrar solo el resultado MCP y el estudiante puede perder el acceso al token. El estudiante guarda la credencial en privado y configura `Authorization: Bearer <token>` en el cliente MCP antes de conectarlo.
+
+## Arranque en frío y suspensión
+
+Render suspende por inactividad los servicios gratuitos. Railway puede hacer lo mismo si el servicio tiene activada la opción Serverless. Las primeras peticiones tras la suspensión tendrán que esperar el arranque y pueden causar timeouts generalizados en los clientes MCP de los alumnos.
+
+Configura un monitor externo para enviar `GET /health` antes de abrir la ventana de entrega y durante toda la ventana. Si el plan permite mantener el servicio activo con tráfico, usa un intervalo menor al umbral de inactividad. Verifica que el monitor reciba HTTP 200 en la URL pública antes de abrir las entregas. Un HTTP 503 indica un fallo de SQLite o una diferencia entre las migraciones aplicadas y los archivos del despliegue. Si el plan suspende el servicio a pesar de los pings, usa un plan sin suspensión durante las entregas.
+
 ## Configuración de Volúmenes en Producción
 
 SQLite guarda los equipos y las entregas en `data/grader.db`. Sin un volumen persistente, cada redespliegue que reemplace el contenedor borrará los equipos y las entregas registrados. Al arrancar, el servicio creará una base vacía.
 
-Con el `Dockerfile` del repositorio, monta el mismo disco persistente de Render o volumen de Railway en `/app/data` en cada despliegue. Monta el directorio completo para que SQLite pueda guardar `grader.db` y sus archivos auxiliares `grader.db-wal` y `grader.db-shm` en el mismo volumen. El usuario del servicio debe poder leer y escribir en el directorio. Mantén una sola réplica del servicio con este volumen.
+Con el `Dockerfile` del repositorio, monta el mismo disco persistente de Render o volumen de Railway en `/app/data` en cada despliegue. Monta el directorio completo para que SQLite pueda guardar `grader.db` y sus archivos auxiliares `grader.db-wal` y `grader.db-shm` en el mismo volumen. El servicio se ejecuta como UID/GID `10001:10001`. Ese usuario debe poder leer y escribir en el directorio y en los archivos existentes de SQLite y del log. Mantén una sola réplica del servicio con este volumen.
 
 Si ya hay registros en el almacenamiento efímero, detén las escrituras y haz una copia con `sqlite3 .backup` antes del primer redespliegue. Restaura la copia en el volumen siguiendo el procedimiento de este runbook. Tras el despliegue, comprueba `/health` y exporta una sección conocida para verificar que se conservaron los registros.
 

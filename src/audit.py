@@ -65,8 +65,8 @@ class AuditMiddleware:
             nonlocal started
             if message["type"] == "http.response.start":
                 started = True
-                # Log method and status only. Headers, query strings and bodies can carry secrets.
-                logger.info("HTTP %s status=%s", scope["method"], message["status"])
+                # Keep headers, query strings and bodies out of the request log.
+                logger.info("HTTP %s %s status=%s", scope["method"], scope["path"], message["status"])
             await send(message)
 
         try:

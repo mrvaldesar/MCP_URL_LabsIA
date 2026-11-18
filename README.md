@@ -2,10 +2,10 @@
 
 Un servidor MCP (Model Context Protocol) remoto y asíncrono diseñado para automatizar la recepción y evaluación de los laboratorios del curso de Inteligencia Artificial (Ingeniería en Informática y Sistemas).
 
-Este servidor expone herramientas (Tools) mediante Streamable HTTP para que los agentes de codificación de los estudiantes (Cursor, Claude Desktop, Jules, etc.) puedan registrar equipos y enviar métricas de forma autónoma.
+Este servidor expone herramientas (Tools) mediante Streamable HTTP para registrar equipos desde una terminal y enviar métricas desde clientes MCP como Cursor, Claude Desktop y Jules.
 
 ## 🚀 Características Principales
-- **Registro Agentic:** Los agentes de IA pueden registrar a los estudiantes mediante la herramienta MCP de registro.
+- **Registro de equipos:** Los estudiantes obtienen su credencial desde una terminal antes de conectar su cliente MCP.
 - **Validación Estricta:** Uso de Pydantic para asegurar que todos los envíos cumplan con la estructura de calificación requerida (identificadores de entregable, hashes de commit y JSON válido).
 - **Transporte remoto (Streamable HTTP):** Arquitectura lista para la nube, permitiendo conexiones desde cualquier cliente MCP compatible.
 - **Persistencia Segura:** Base de datos relacional en SQLite con manejo de concurrencia web.
@@ -18,9 +18,13 @@ Este servidor expone herramientas (Tools) mediante Streamable HTTP para que los 
 ### Opción A. Docker
 
 ```bash
+mkdir -p data
+sudo chown 10001:10001 data
 docker build -t landivar-mcp-grader .
 docker run -d -p 8000:8000 -v "$(pwd)/data:/app/data" --name mcp_grader landivar-mcp-grader
 ```
+
+La imagen ejecuta el servicio con UID y GID `10001`. Si el volumen montado ya contiene una base, ese usuario necesita acceso de lectura y escritura al directorio y a los archivos existentes de SQLite y del log.
 
 ### Opción B. Entorno local
 
@@ -32,6 +36,10 @@ python -m src.server
 ```
 
 El servidor estará escuchando en http://localhost:8000 (o el dominio configurado). El archivo de base de datos se creará automáticamente en `data/grader.db`.
+
+### Arranque en frío y suspensión
+
+La capa gratuita de Render suspende servicios inactivos. En Railway, el servicio puede dormir si está habilitada la suspensión por inactividad (Serverless). El arranque en frío puede provocar timeouts generalizados en los clientes MCP durante una entrega. Configura un monitor externo que haga ping a `GET /health` antes y durante la ventana de entrega, con un intervalo menor al tiempo de inactividad de la plataforma si el plan lo permite. Si el plan sigue suspendiendo el servicio, usa una opción sin suspensión durante esas ventanas. [Runbook de operación](docs/runbook.md)
 
 ### Verificación de entregas en GitHub
 
@@ -62,15 +70,15 @@ también requieren una asignación antes de enviar nuevas entregas.
 
 ## 🤖 Uso para los estudiantes
 
-Configura el cliente MCP para conectarse a `/mcp` mediante Streamable HTTP. La inicialización y el listado de herramientas están disponibles sin token.
+**Antes de conectar el LLM, ejecuta manualmente `curl -i` en tu terminal** con el ejemplo de registro de abajo. El servidor devuelve `X-Team-Token` una sola vez como encabezado HTTP. El agente puede mostrar solo la confirmación MCP y perder el token si realiza el registro por ti.
 
-1. Llama a `register_team(team_name, section, modality, members)`. Usa la sección `01` o `02` y proporciona uno, dos o tres integrantes según la modalidad `individual`, `pareja` o `trio`. Cada integrante requiere `github_user` y un `carnet` de siete dígitos.
-2. El registro devuelve una confirmación MCP y entrega el token una sola vez en el encabezado de respuesta `X-Team-Token`. Usa un cliente que permita leer los encabezados HTTP, como `curl -i`, para recogerlo. Configura el cliente MCP para enviarlo en `Authorization: Bearer <token>`. El agente no lee ni escribe archivos `.env`.
-3. Llama a `submit_lab_results(deliverable_id, label, commit_hash, metrics_json, is_ci_passing)`. El identificador va de `D1` a `D10`, el commit usa entre 7 y 40 dígitos hexadecimales en minúscula y las métricas se envían como una cadena JSON válida de hasta 64 KiB en UTF-8. Publica en el repositorio asignado la etiqueta Git indicada en `label` (por ejemplo, `D1`) antes de enviar. GitHub debe resolver el hash declarado al mismo commit al que apunta la etiqueta. Las métricas y el estado de CI siguen siendo declaraciones del equipo.
+1. En la solicitud de `register_team`, usa la sección `01` o `02` y proporciona uno, dos o tres integrantes según la modalidad `individual`, `pareja` o `trio`. Cada integrante requiere `github_user` y un `carnet` de siete dígitos.
+2. Guarda el valor de `X-Team-Token` en privado. Configura el cliente MCP para conectarse a `/mcp` mediante Streamable HTTP con el encabezado `Authorization: Bearer <token>`. Conecta el LLM después de configurar la credencial.
+3. Llama a `submit_lab_results(deliverable_id, label, commit_hash, metrics_json, is_ci_passing)`. El identificador va de `D1` a `D10`, el commit usa entre 7 y 40 dígitos hexadecimales en minúscula y las métricas se envían como una cadena JSON válida de hasta 64 KiB en UTF-8. Publica en el repositorio asignado una etiqueta Git `label` idéntica a `deliverable_id` (por ejemplo, `D1`) antes de enviar. GitHub debe resolver el hash declarado al mismo commit al que apunta la etiqueta. Las métricas y el estado de CI siguen siendo declaraciones del equipo.
 
 El recibo incluye `receipt_id`, `deliverable_id`, `label`, `received_at_utc`, `status`, `attempt` y `section`. Las métricas y el estado de CI son declaraciones del equipo. El estado `received` confirma la recepción.
 
-Ejemplo de registro desde una terminal del estudiante:
+Usa la URL HTTPS del curso en lugar de `http://localhost:8000` para el registro remoto.
 
 ```bash
 curl -i http://localhost:8000/mcp \
@@ -85,8 +93,9 @@ Configura `ADMIN_TOKEN` en el entorno del servidor con una credencial independie
 
 | Ruta | Operación |
 | --- | --- |
-| `GET /health` | Comprueba SQLite. Disponible sin token. |
+| `GET /health` | Comprueba SQLite y que las migraciones aplicadas coincidan con los archivos del despliegue. Devuelve 503 si falla la comprobación. Disponible sin token. |
 | `POST /admin/teams/{id}/rotate-token` | Invalida la credencial anterior y entrega la nueva en `X-Team-Token`. El ID del equipo aparece en el CSV. |
+| `POST /admin/teams/{id}/update` | Actualiza los integrantes o la modalidad y entrega una credencial nueva en `X-Team-Token`. |
 | `GET /admin/export?section=01` | Descarga los envíos de la sección indicada como CSV. |
 | `POST /admin/roster` | Reemplaza el padrón de una sección con un JSON que contiene `section` y `members`. |
 
@@ -96,7 +105,11 @@ Ejemplo de cuerpo para el padrón:
 {"section":"01","members":[{"github_user":"alumna-uno","carnet":"1234524"}]}
 ```
 
-El servidor permite hasta cinco registros por IP en diez minutos y hasta diez llamadas a `submit_lab_results` por token de equipo en un minuto. Cuenta las solicitudes en ventanas móviles en memoria. Cada proceso mantiene su propio conteo y lo reinicia al arrancar. Aplica las migraciones al arrancar y escribe logs JSON en `grader.log`. Configura `GRADER_LOG_PATH` para cambiar la ruta, por ejemplo a `/app/data/grader.log` para usar el volumen persistente de Docker.
+Configura `STRICT_ROSTER=true` para exigir que el usuario GitHub y el carné de cada integrante coincidan con una misma entrada del padrón de su sección. El modo predeterminado permite registros fuera del padrón y deja una advertencia en el log.
+
+Para actualizar un equipo, envía `members` con la lista completa de integrantes, `modality` o ambos campos. Si envías solo `members`, la modalidad se deduce de la cantidad de integrantes. Si envías solo `modality`, debe corresponder a la cantidad de integrantes que ya tiene el equipo. Una actualización exitosa invalida la credencial anterior.
+
+El servidor permite hasta cinco registros por IP en diez minutos y hasta diez llamadas a `submit_lab_results` por token de equipo en un minuto. Cuenta las solicitudes en ventanas móviles en memoria. Cada proceso mantiene su propio conteo y lo reinicia al arrancar. Aplica las migraciones al arrancar y escribe logs JSON en `grader.log` en local y en `/app/data/grader.log` en Docker. Configura `GRADER_LOG_PATH` para cambiar la ruta, por ejemplo a `/app/data/grader.log` para usar el volumen persistente de Docker.
 
 Para exportar desde una copia local de la base, ejecuta desde la raíz del repositorio:
 

@@ -14,7 +14,7 @@ from src import database
 from src.audit import logger
 from src.auth import MAX_REQUEST_BYTES, TOKEN_PATTERN
 from src.export import export_section
-from src.models import Member, Section
+from src.models import Member, Modality, Section
 
 NO_STORE = {"Cache-Control": "no-store"}
 
@@ -68,13 +68,55 @@ class Roster(BaseModel):
     members: list[Member] = Field(max_length=10_000)
 
 
-@admin_only
-async def upload_roster(request: Request):
+async def read_admin_body(request: Request) -> bytearray | None:
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > MAX_REQUEST_BYTES:
-            return JSONResponse({"error": "La solicitud supera 1 MiB."}, status_code=413)
+            return None
         body.extend(chunk)
+    return body
+
+
+class TeamUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    members: list[Member] | None = Field(default=None, min_length=1, max_length=3)
+    modality: Modality | None = None
+
+
+@admin_only
+async def update_team(request: Request):
+    team_id = request.path_params["id"]
+    if not 0 < team_id <= 2**63 - 1:
+        return JSONResponse({"error": "Equipo no encontrado."}, status_code=404)
+    body = await read_admin_body(request)
+    if body is None:
+        return JSONResponse({"error": "La solicitud supera 1 MiB."}, status_code=413)
+    try:
+        update = TeamUpdate.model_validate_json(body)
+    except ValidationError:
+        return JSONResponse({"error": "Actualización inválida. Revisa la modalidad y los integrantes."}, status_code=400)
+    if update.members is None and update.modality is None:
+        return JSONResponse({"error": "Indica members o modality."}, status_code=400)
+
+    members = [member.model_dump() for member in update.members] if update.members is not None else None
+    try:
+        token = await run_in_threadpool(database.update_team, team_id, members, update.modality)
+    except database.MemberIdentityConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if token is None:
+        return JSONResponse({"error": "Equipo no encontrado."}, status_code=404)
+    logger.info("Equipo actualizado y credencial rotada id=%d", team_id)
+    return JSONResponse({"team_id": team_id}, headers={**NO_STORE, "X-Team-Token": token})
+
+
+@admin_only
+async def upload_roster(request: Request):
+    body = await read_admin_body(request)
+    if body is None:
+        return JSONResponse({"error": "La solicitud supera 1 MiB."}, status_code=413)
     try:
         roster = Roster.model_validate_json(body)
     except ValidationError:
@@ -89,6 +131,7 @@ async def upload_roster(request: Request):
 
 
 ROUTES = [
+    Route("/admin/teams/{id:int}/update", update_team, methods=["POST"]),
     Route("/admin/teams/{id:int}/rotate-token", rotate_token, methods=["POST"]),
     Route("/admin/export", download_export, methods=["GET"]),
     Route("/admin/roster", upload_roster, methods=["POST"]),
