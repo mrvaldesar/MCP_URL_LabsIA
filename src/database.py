@@ -1,10 +1,8 @@
 import hashlib
 import hmac
 import json
-import math
 import secrets
 import sqlite3
-import time
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -222,17 +220,3 @@ def replace_roster(section: str, members: list[tuple[str, str]]):
 def check_health():
     with _connect() as conn:
         conn.execute("SELECT name FROM schema_migrations LIMIT 1").fetchone()
-
-
-def registration_retry_after(ip: str) -> int | None:
-    with _connect() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        now = time.time()
-        conn.execute("DELETE FROM registration_requests WHERE requested_at <= ?", (now - 60,))
-        count, oldest = conn.execute("""
-            SELECT COUNT(*), MIN(requested_at) FROM registration_requests WHERE ip = ?
-        """, (ip,)).fetchone()
-        if count >= 5:
-            return max(1, math.ceil(oldest + 60 - now))
-        conn.execute("INSERT INTO registration_requests VALUES (?, ?)", (ip, now))
-    return None

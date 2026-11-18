@@ -96,7 +96,7 @@ Ejemplo de cuerpo para el padrón:
 {"section":"01","members":[{"github_user":"alumna-uno","carnet":"1234524"}]}
 ```
 
-El servidor limita el registro a cinco solicitudes por IP en 60 segundos. Aplica las migraciones al arrancar y escribe logs JSON en `grader.log`. Configura `GRADER_LOG_PATH` para cambiar la ruta, por ejemplo a `/app/data/grader.log` para usar el volumen persistente de Docker.
+El servidor permite hasta cinco registros por IP en diez minutos y hasta diez llamadas a `submit_lab_results` por token de equipo en un minuto. Cuenta las solicitudes en ventanas móviles en memoria. Cada proceso mantiene su propio conteo y lo reinicia al arrancar. Aplica las migraciones al arrancar y escribe logs JSON en `grader.log`. Configura `GRADER_LOG_PATH` para cambiar la ruta, por ejemplo a `/app/data/grader.log` para usar el volumen persistente de Docker.
 
 Para exportar desde una copia local de la base, ejecuta desde la raíz del repositorio:
 

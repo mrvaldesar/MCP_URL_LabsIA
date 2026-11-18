@@ -22,6 +22,6 @@ Las rutas HTTP de administración quedan fuera del listado de herramientas MCP. 
 - `POST /admin/teams/{id}/rotate-token` reemplaza la credencial del equipo y entrega la nueva en `X-Team-Token`.
 - `GET /admin/export?section=01` descarga un CSV de envíos de la sección `01` o `02`.
 - `POST /admin/roster` recibe `{"section":"01","members":[{"github_user":"alumna-uno","carnet":"1234524"}]}`. Reemplaza atómicamente el padrón de esa sección para consulta operativa. El registro MCP conserva sus propias validaciones.
-- `GET /health` comprueba SQLite. El registro MCP permite cinco solicitudes por IP en una ventana de 60 segundos. El sexto devuelve 429 con `Retry-After`.
+- `GET /health` comprueba SQLite. El registro MCP permite cinco solicitudes por IP cada diez minutos y devuelve 429 con `Retry-After` al superar el límite. Las entregas permiten diez solicitudes por token de equipo cada minuto y devuelven un error de herramienta MCP con `Retry-After` al superar el límite.
 
 El arranque aplica las migraciones numeradas de `migrations/` y guarda su historial en `schema_migrations`. Escribe eventos JSON en `grader.log` o en `GRADER_LOG_PATH` si está configurado. Mantén las credenciales fuera de los logs.
