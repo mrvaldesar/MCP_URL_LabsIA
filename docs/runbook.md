@@ -220,3 +220,5 @@ Configura un chequeo HTTPS a `GET /health` cada 60 segundos durante las recepcio
 - Supervisa `pending_receipts`, `pending_repositories` e `inconsistent_repositories`. Si estos conteos suben, revisa el CSV y `GET /admin/teams` con credenciales docentes.
 
 El objeto público contiene solo conteos globales. Mantén las credenciales administrativas fuera del monitor.
+
+Las cabeceras de espera también pausan en memoria los reintentos de otros recibos y repositorios en la misma réplica. La fecha del recibo que recibió la respuesta de GitHub se conserva en SQLite.

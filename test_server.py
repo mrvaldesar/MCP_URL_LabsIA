@@ -20,6 +20,7 @@ from src.server import create_server
 @pytest.fixture
 def grader_db(tmp_path, monkeypatch):
     monkeypatch.setattr(github, "_credential_alert", None)
+    monkeypatch.setattr(github, "_retry_not_before", 0)
     path = tmp_path / "grader.db"
     monkeypatch.setattr(database, "DB_PATH", path)
     monkeypatch.setenv("GRADER_LOG_PATH", str(tmp_path / "grader.log"))
@@ -1452,3 +1453,25 @@ def test_public_monitor_exposes_stable_counts_without_github_calls(grader_db, gi
         assert len(coverage_checks) == 1
         assert token not in response.text and "Equipo monitor" not in response.text
         assert "Cobertura de todos los repositorios" in grader_db.with_name("grader.log").read_text()
+
+
+def test_github_rate_limit_schedules_receipt_and_pauses_other_retries(client, grader_db, monkeypatch):
+    from time import time
+
+    from src import verification
+
+    token = register(client, "Cuota GitHub", [MEMBER]).headers["X-Team-Token"]
+    submit(client, token, deliverable_id="D7", label="D7")
+    reset = int(time()) + 120
+
+    async def throttled(http_client, path):
+        return httpx.Response(429, headers={"Retry-After": "60", "X-RateLimit-Reset": str(reset)})
+
+    monkeypatch.setattr(github, "_request", throttled)
+    submit(client, token, deliverable_id="D8", label="D8")
+    assert github.retry_not_before() == reset
+    assert asyncio.run(verification.retry(1, "02", "docente")) == ("programado", (0, reset))
+    with closing(sqlite3.connect(grader_db)) as conn:
+        assert conn.execute("""
+            SELECT verification_retry_count, verification_retry_next_at FROM submissions ORDER BY id
+        """).fetchall() == [(0, 0), (0, reset)]

@@ -28,7 +28,8 @@ def retry_interval() -> int:
 async def retry(receipt_id: int, section: str | None, actor: str):
     limit = max_attempts()
     outcome, claimed = await run_in_threadpool(database.claim_verification, receipt_id, section, limit,
-                                               retry_window(), github.credential_alert_active())
+                                               retry_window(), github.credential_alert_active(),
+                                               github.retry_not_before())
     if outcome != "tomado":
         return outcome, claimed
     repository, label, sha, count, lease = claimed
@@ -61,7 +62,7 @@ async def retry(receipt_id: int, section: str | None, actor: str):
 
 async def retry_repositories():
     for team_id, repository, section in await run_in_threadpool(database.pending_repositories):
-        if github.credential_alert_active():
+        if github.credential_alert_active() or github.retry_not_before():
             break
         next_at = 0
         try:
@@ -83,6 +84,8 @@ async def retry_batch():
     aged = await run_in_threadpool(database.aged_pending_count, threshold)
     if aged:
         logger.warning("Recibos pendientes de GitHub por más de %d minutos cantidad=%d", threshold, aged)
+    if github.retry_not_before():
+        return
     await github.recover_credential()
     if github.credential_alert_active():
         return

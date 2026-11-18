@@ -41,6 +41,7 @@ APP_ENV = ("GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KE
 _token_lock = asyncio.Lock()
 _installation_token = None
 _credential_alert = None
+_retry_not_before = 0
 
 
 def _app_config():
@@ -81,11 +82,22 @@ def retry_at(response: httpx.Response) -> int:
             pass
     # GitHub sends the reset for successful quota usage too. Use it only
     # when throttled or when the response asks for a retry.
-    if response.status_code in (403, 429) or retry:
+    if response.status_code in (403, 429) or retry or response.headers.get("x-ratelimit-remaining") == "0":
         reset = response.headers.get("x-ratelimit-reset", "")
         if reset.isascii() and reset.isdecimal() and len(reset) <= 12:
             times.append(int(reset))
     return min(max(times), 253402300799)
+
+
+def retry_not_before() -> int:
+    return _retry_not_before if _retry_not_before > int(time()) else 0
+
+
+def _unavailable(response: httpx.Response, message: str) -> GitHubUnavailable:
+    global _retry_not_before
+    scheduled = retry_at(response)
+    _retry_not_before = max(_retry_not_before, scheduled)
+    return GitHubUnavailable(message, retry_at=scheduled)
 
 
 def credential_alert_active() -> bool:
@@ -168,7 +180,7 @@ async def _app_token(client, config):
         if response.status_code == 404:
             _credential_error("instalación_app")
         if response.status_code != 201:
-            raise GitHubUnavailable("GitHub no pudo emitir el token de instalación. Intenta más tarde.", retry_at=retry_at(response))
+            raise _unavailable(response, "GitHub no pudo emitir el token de instalación. Intenta más tarde.")
         try:
             payload = response.json()
             token = payload["token"]
@@ -228,7 +240,7 @@ async def _get(client: httpx.AsyncClient, path: str) -> dict:
             payload = None
         if isinstance(payload, dict):
             return payload
-    raise GitHubUnavailable("GitHub no pudo verificar la solicitud. Intenta más tarde o avisa al docente.", retry_at=retry_at(response))
+    raise _unavailable(response, "GitHub no pudo verificar la solicitud. Intenta más tarde o avisa al docente.")
 
 
 async def _can_confirm_absence(client, organization: str) -> bool:
@@ -247,7 +259,7 @@ async def _can_confirm_absence(client, organization: str) -> bool:
     response = await _request(client, f"/orgs/{organization}/repos?type=private&per_page=1")
     _check_credential(response)
     if not response.is_success:
-        raise GitHubUnavailable("GitHub no pudo confirmar acceso a la organización.", retry_at=retry_at(response))
+        raise _unavailable(response, "GitHub no pudo confirmar acceso a la organización.")
     try:
         repos = response.json()
     except ValueError:
@@ -308,7 +320,7 @@ async def _check_contents_access(client, path):
     response = await _request(client, f"{path}/git/matching-refs/tags")
     _check_credential(response)
     if not response.is_success:
-        raise GitHubUnavailable("GitHub no permite confirmar el acceso al contenido. Avisa al docente.", retry_at=retry_at(response))
+        raise _unavailable(response, "GitHub no permite confirmar el acceso al contenido. Avisa al docente.")
     try:
         refs = response.json()
     except ValueError:

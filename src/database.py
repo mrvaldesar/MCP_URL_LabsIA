@@ -94,8 +94,8 @@ def _migrate_legacy_rows(conn: sqlite3.Connection):
     """):
         salt = secrets.token_hex(16)
         conn.execute("""
-            INSERT INTO teams (id, token_hash, salt, section, modality, members, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO teams (id, token_hash, salt, section, modality, members, created_at, repository_verification_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente')
         """, (team_id, _token_hash(token, salt), salt, section, modality, members, created_at))
         conn.executemany("""
             INSERT INTO member_identities (carnet) VALUES (?)
@@ -355,7 +355,7 @@ def aged_pending_count(minutes: int) -> int:
         """, (f"-{minutes} minutes",)).fetchone()[0]
 
 
-def claim_verification(receipt_id: int, section: str | None, max_attempts: int, window: int, credential_alert: bool):
+def claim_verification(receipt_id: int, section: str | None, max_attempts: int, window: int, credential_alert: bool, rate_limit_until: int):
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("""
@@ -372,6 +372,7 @@ def claim_verification(receipt_id: int, section: str | None, max_attempts: int, 
             return "en_curso", None
         if started is None or started + window <= now or count >= max_attempts:
             return "agotado", None
+        next_at = max(next_at, rate_limit_until)
         if credential_alert or next_at > now:
             return "programado", (count, next_at)
         lease = now + 600
