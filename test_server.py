@@ -216,7 +216,7 @@ def test_health_without_authentication(client):
     response = client.get("/health")
     assert response.status_code == 200
     payload = response.json()
-    assert payload.keys() == {"status", "timestamp"}
+    assert payload.keys() == {"status", "timestamp", "stale_verification_count", "stale_verification_minutes"}
     assert payload["status"] == "ok"
     assert datetime.fromisoformat(payload["timestamp"]).utcoffset() == timedelta(0)
 
@@ -310,7 +310,7 @@ def test_sql_migrations_run_once(grader_db):
         assert conn.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall() == [
             ("001_initial_schema.sql",), ("002_teacher_operations.sql",),
             ("003_team_github_repository.sql",), ("004_github_verification.sql",),
-            ("005_delivery_windows.sql",), ("006_submission_team_snapshot.sql",),
+            ("005_delivery_windows.sql",), ("006_submission_team_snapshot.sql",), ("007_verification_retries.sql",),
         ]
 
 
@@ -787,7 +787,7 @@ def test_admin_retry_and_credential_health(client, grader_db, monkeypatch):
     headers = {"Authorization": "Bearer admin-test-credential"}
     path = f"/admin/submissions/{receipt['receipt_id']}/retry-verification"
     result = client.post(path, headers=headers)
-    assert result.json() == {"receipt_id": 1, "verification_status": "verificado", "verified_ci_status": "exitoso"}
+    assert result.json() == {"receipt_id": 1, "verification_status": "verificado", "verified_ci_status": "exitoso", "verification_retry_count": 1}
     assert client.post(path, headers=headers).status_code == 404
     assert client.get("/admin/github/health", headers=headers).json() == {"github_credential_status": "valida"}
 
@@ -1082,3 +1082,33 @@ def test_failed_carnet_limit_does_not_cross_ips(grader_db, github_api, monkeypat
         assert "Demasiados intentos" in register(other, "Equivocado", [MEMBER]).text
         student = TestClient(app, client=("192.0.2.11", 12345), base_url="http://localhost:8000")
         assert "X-Team-Token" in register(student, "Estudiante", [MEMBER]).headers
+
+
+def test_periodic_retries_stop_at_limit_and_report_aged_receipts(grader_db, github_api, monkeypatch):
+    from time import monotonic, sleep
+
+    monkeypatch.setenv("GITHUB_RETRY_INTERVAL_SECONDS", "1")
+    monkeypatch.setenv("GITHUB_RETRY_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("GITHUB_PENDING_ALERT_MINUTES", "3")
+    with TestClient(create_server().streamable_http_app(), base_url="http://localhost:8000") as client:
+        token = register(client, "Equipo pendiente", [MEMBER]).headers["X-Team-Token"]
+        response = submit(client, token, deliverable_id="D7", label="D7")
+        assert response.json()["result"]["structuredContent"]["verification_status"] == "pendiente"
+        with closing(sqlite3.connect(grader_db)) as conn, conn:
+            conn.execute("UPDATE submissions SET received_at_utc = '2000-01-01T00:00:00+00:00'")
+        assert client.get("/health").json()["stale_verification_count"] == 1
+        assert client.get("/health").json()["stale_verification_minutes"] == 3
+        deadline = monotonic() + 8
+        log_path = grader_db.with_name("grader.log")
+        while "agotó sus reintentos" not in log_path.read_text() and monotonic() < deadline:
+            sleep(0.02)
+        log = log_path.read_text()
+        assert "por más de 3 minutos cantidad=1" in log
+        assert "actor=reintento_automático recibo=1 reintento=2 estado=pendiente" in log
+        headers = {"Authorization": "Bearer admin-test-credential"}
+        assert client.post("/admin/submissions/1/retry-verification", headers=headers).status_code == 409
+        row = next(csv.DictReader(io.StringIO(client.get("/admin/export?section=02", headers=headers).text)))
+        assert (row["verification_status"], row["verified_ci_status"], row["verification_retry_count"]) == (
+            "pendiente", "desconocido", "2",
+        )
+        assert database.pending_verification_ids(2) == []

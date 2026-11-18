@@ -13,7 +13,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from src import database, github
+from src import database, github, verification
 from src.audit import logger
 from src.auth import MAX_REQUEST_BYTES, TOKEN_PATTERN
 from src.export import export_section
@@ -65,6 +65,7 @@ def admin_only(endpoint):
         if identity is None:
             return JSONResponse({"error": "Acceso administrativo denegado."}, status_code=403)
         request.state.admin_section = section
+        request.state.admin_actor = identity
         response = await endpoint(request)
         resource = getattr(request.state, "audit_resource", request.path_params.get("id", "-"))
         logger.info("Administración actor=%s acción=%s recurso=%s estado=%d",
@@ -188,28 +189,16 @@ async def github_health(request: Request):
 @admin_only
 async def retry_verification(request: Request):
     receipt_id = request.path_params["id"]
-    pending = None
-    if 0 < receipt_id <= 2**63 - 1:
-        pending = await run_in_threadpool(database.pending_submission, receipt_id, request.state.admin_section)
-    if pending is None:
+    if not 0 < receipt_id <= 2**63 - 1:
         return JSONResponse({"error": "Recibo pendiente no encontrado."}, status_code=404)
-    repository, label, sha = pending
-    ci = "desconocido"
-    try:
-        sha = await github.verify_submission(repository, label, sha)
-    except github.GitHubUnavailable:
-        return JSONResponse({"receipt_id": receipt_id, "verification_status": "pendiente"}, status_code=202)
-    except github.GitHubVerificationError:
-        status = "inconsistente"
-    else:
-        status = "verificado"
-        ci = await github.verified_ci_status(repository, sha)
-    updated = await run_in_threadpool(database.finish_verification, receipt_id, sha, status, ci,
-                                      request.state.admin_section)
-    if not updated:
-        return JSONResponse({"error": "El recibo cambió. Consulta el CSV."}, status_code=409)
-    logger.info("Verificación reintentada recibo=%d estado=%s", receipt_id, status)
-    return JSONResponse({"receipt_id": receipt_id, "verification_status": status, "verified_ci_status": ci})
+    outcome, payload = await verification.retry(receipt_id, request.state.admin_section, request.state.admin_actor)
+    if outcome == "ausente":
+        return JSONResponse({"error": "Recibo pendiente no encontrado."}, status_code=404)
+    if outcome == "agotado":
+        return JSONResponse({"error": "Se alcanzó el máximo de reintentos del recibo."}, status_code=409)
+    if outcome in ("en_curso", "cambió"):
+        return JSONResponse({"error": "El recibo cambió o ya se está verificando. Consulta el CSV."}, status_code=409)
+    return JSONResponse(payload, status_code=202 if outcome == "pendiente" else 200)
 
 
 class DeliveryWindow(BaseModel):

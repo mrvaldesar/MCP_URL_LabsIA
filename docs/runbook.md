@@ -190,3 +190,9 @@ El destino y su directorio deben estar en un filesystem que admita enlaces duros
 3. Arranca la nueva versión sobre el volumen persistente. El arranque aplica las migraciones 001 a 006 en orden, solo si faltan. Las nuevas son `004_github_verification.sql`, `005_delivery_windows.sql` y `006_submission_team_snapshot.sql`.
 4. Verifica `/health`, `tools/list`, el CSV de ambas secciones y el acceso de GitHub. Mantén una réplica activa antes de reabrir. Configura el monitor según la sección de arranque en frío.
 5. Para revertir, pausa el tráfico, conserva una copia de la base posterior a la actualización, restaura la copia anterior y arranca el código anterior. Esta reversión restaura los recibos hasta la toma de esa copia. Concilia con las etiquetas oficiales cualquier recibo posterior antes de reabrir el servicio.
+
+### Reintentos automáticos
+
+El proceso reintenta recibos pendientes por lotes de hasta 20. Ajusta `GITHUB_RETRY_INTERVAL_SECONDS` (60), `GITHUB_RETRY_MAX_ATTEMPTS` (5) y `GITHUB_PENDING_ALERT_MINUTES` (15). El máximo incluye los reintentos manuales y automáticos, excluyendo la primera recepción. El contador se conserva en SQLite y se exporta como `verification_retry_count`. Un recibo agotado sigue pendiente para revisión docente. `GET /health` incluye `stale_verification_count` y `stale_verification_minutes`; el proceso también registra una advertencia cuando hay recibos más antiguos que el umbral. El campo `status` de salud sigue indicando la disponibilidad de SQLite.
+
+La migración `007_verification_retries.sql` aplica al arrancar y deja en cero el contador de los recibos existentes. Usa el procedimiento de reversión con copia previa también para esta migración.

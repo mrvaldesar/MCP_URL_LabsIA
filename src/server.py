@@ -16,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from src import database
+from src import database, verification
 from src.admin import ROUTES
 from src.audit import AuditMiddleware, audit_log, logger
 from src.auth import TeamAuthMiddleware
@@ -32,13 +32,17 @@ MAX_METRICS_BYTES = 64 * 1024
 async def health(request: Request):
     try:
         migrations_match = await run_in_threadpool(database.check_health)
+        if migrations_match:
+            threshold = verification.stale_minutes()
+            aged = await run_in_threadpool(database.aged_pending_count, threshold)
     except sqlite3.Error:
         logger.exception("Falló el chequeo de SQLite")
         return JSONResponse({"status": "unavailable"}, status_code=503)
     if not migrations_match:
         logger.warning("Las migraciones aplicadas no coinciden con los archivos del despliegue")
         return JSONResponse({"status": "unavailable"}, status_code=503)
-    return JSONResponse({"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()})
+    return JSONResponse({"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat(),
+                         "stale_verification_count": aged, "stale_verification_minutes": threshold})
 
 
 VALIDATION_HINTS = {
@@ -90,7 +94,7 @@ class GraderMCP(FastMCP):
                 except Exception:
                     logger.exception("No se pudo inicializar SQLite")
                     raise
-                async with transport_lifespan(app):
+                async with transport_lifespan(app), verification.background_retries():
                     yield
 
         app.router.lifespan_context = lifespan

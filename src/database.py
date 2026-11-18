@@ -333,21 +333,54 @@ def check_health() -> bool:
         applied = {name for (name,) in conn.execute("SELECT name FROM schema_migrations")}
     return bool(expected) and applied == expected
 
-def pending_submission(receipt_id: int, section: str | None):
+def pending_verification_ids(max_attempts: int) -> list[int]:
     with _connect() as conn:
-        return conn.execute("""
-            SELECT s.github_repository, s.label, s.commit_hash FROM submissions AS s
-            WHERE s.id = ? AND s.verification_status = 'pendiente' AND (? IS NULL OR s.received_section = ?)
-        """, (receipt_id, section, section)).fetchone()
+        return [row[0] for row in conn.execute("""
+            SELECT id FROM submissions WHERE verification_status = 'pendiente'
+              AND verification_retry_count < ? AND verification_retry_lease_until <= unixepoch()
+            ORDER BY verification_retry_count, id LIMIT 20
+        """, (max_attempts,))]
 
 
-def finish_verification(receipt_id: int, sha: str, status: str, ci: str, section: str | None) -> bool:
+def aged_pending_count(minutes: int) -> int:
     with _connect() as conn:
         return conn.execute("""
-            UPDATE submissions SET commit_hash = ?, verification_status = ?, verified_ci_status = ?
-            WHERE id = ? AND verification_status = 'pendiente'
+            SELECT COUNT(*) FROM submissions WHERE verification_status = 'pendiente'
+              AND julianday(received_at_utc) < julianday('now', ?)
+        """, (f"-{minutes} minutes",)).fetchone()[0]
+
+
+def claim_verification(receipt_id: int, section: str | None, max_attempts: int):
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("""
+            SELECT github_repository, label, commit_hash, verification_retry_count,
+                   verification_retry_lease_until > unixepoch()
+            FROM submissions WHERE id = ? AND verification_status = 'pendiente'
               AND (? IS NULL OR received_section = ?)
-        """, (sha, status, ci, receipt_id, section, section)).rowcount == 1
+        """, (receipt_id, section, section)).fetchone()
+        if row is None:
+            return "ausente", None
+        repository, label, sha, count, leased = row
+        if leased:
+            return "en_curso", None
+        if count >= max_attempts:
+            return "agotado", None
+        conn.execute("""
+            UPDATE submissions SET verification_retry_count = ?, verification_retry_lease_until = unixepoch() + 600
+            WHERE id = ?
+        """, (count + 1, receipt_id))
+        return "tomado", (repository, label, sha, count + 1)
+
+
+def finish_verification(receipt_id: int, count: int, sha: str, status: str, ci: str) -> bool:
+    with _connect() as conn:
+        return conn.execute("""
+            UPDATE submissions SET commit_hash = ?, verification_status = ?, verified_ci_status = ?,
+                verification_retry_lease_until = 0
+            WHERE id = ? AND verification_status = 'pendiente' AND verification_retry_count = ?
+        """, (sha, status, ci, receipt_id, count)).rowcount == 1
+
 
 def delivery_timing(conn, section, deliverable_id, received):
     window = conn.execute("""
