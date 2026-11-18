@@ -19,6 +19,7 @@ from src.server import create_server
 
 @pytest.fixture
 def grader_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(github, "_credential_alert", None)
     path = tmp_path / "grader.db"
     monkeypatch.setattr(database, "DB_PATH", path)
     monkeypatch.setenv("GRADER_LOG_PATH", str(tmp_path / "grader.log"))
@@ -316,6 +317,7 @@ def test_sql_migrations_run_once(grader_db):
             ("001_initial_schema.sql",), ("002_teacher_operations.sql",),
             ("003_team_github_repository.sql",), ("004_github_verification.sql",),
             ("005_delivery_windows.sql",), ("006_submission_team_snapshot.sql",), ("007_verification_retries.sql",),
+            ("008_retry_schedule.sql",),
         ]
 
 
@@ -1063,6 +1065,8 @@ def test_retry_inconsistency_and_scope(client, grader_db, monkeypatch):
     async def mismatch(*args):
         raise github.GitHubVerificationError("La etiqueta apunta a otro commit.")
     monkeypatch.setattr(github, "verify_submission", mismatch)
+    with closing(sqlite3.connect(grader_db)) as conn, conn:
+        conn.execute("UPDATE submissions SET verification_retry_next_at = 0")
     assert client.post(path, headers=admin).json()["verification_status"] == "inconsistente"
     with closing(sqlite3.connect(grader_db)) as conn:
         assert conn.execute("SELECT attempt, verification_status FROM submissions").fetchall() == [(1, "inconsistente")]
@@ -1101,7 +1105,7 @@ def test_periodic_retries_stop_at_limit_and_report_aged_receipts(grader_db, gith
         response = submit(client, token, deliverable_id="D7", label="D7")
         assert response.json()["result"]["structuredContent"]["verification_status"] == "pendiente"
         with closing(sqlite3.connect(grader_db)) as conn, conn:
-            conn.execute("UPDATE submissions SET received_at_utc = '2000-01-01T00:00:00+00:00'")
+            conn.execute("UPDATE submissions SET received_at_utc = datetime('now', '-4 minutes')")
         assert client.get("/health").json()["stale_verification_count"] == 1
         assert client.get("/health").json()["stale_verification_minutes"] == 3
         deadline = monotonic() + 8
@@ -1275,3 +1279,63 @@ def test_manual_and_automatic_retries_cannot_claim_same_receipt(client, grader_d
     asyncio.run(check())
     log = grader_db.with_name("grader.log").read_text()
     assert "Reintento de verificación iniciado actor=reintento_automático recibo=1 reintento=1" in log
+
+
+def test_retry_backoff_headers_window_and_scoped_reset(client, grader_db, monkeypatch):
+    from time import time
+
+    from src import verification
+
+    monkeypatch.setenv("GITHUB_RETRY_WINDOW_HOURS", "1")
+    token = register(client, "Reintentos", [MEMBER]).headers["X-Team-Token"]
+    receipt = submit(client, token, deliverable_id="D7", label="D7").json()["result"]["structuredContent"]
+    assert receipt["verification_status"] == "pendiente"
+    now = int(time())
+    response = httpx.Response(429, headers={"Retry-After": "120", "X-RateLimit-Reset": str(now + 180)})
+    assert github.retry_at(response) == now + 180
+    from email.utils import formatdate
+    assert github.retry_at(httpx.Response(503, headers={"Retry-After": formatdate(now + 90, usegmt=True)})) == now + 90
+
+    async def unavailable(*args):
+        raise github.GitHubUnavailable(retry_at=now + 180)
+
+    def next_at():
+        with closing(sqlite3.connect(grader_db)) as conn:
+            return conn.execute("SELECT verification_retry_next_at FROM submissions").fetchone()[0]
+
+    monkeypatch.setattr(github, "verify_submission", unavailable)
+    assert asyncio.run(verification.retry(1, "02", "docente"))[1]["verification_retry_count"] == 1
+    assert next_at() == now + 180
+    assert asyncio.run(verification.retry(1, "02", "docente"))[0] == "programado"
+    with closing(sqlite3.connect(grader_db)) as conn, conn:
+        conn.execute("UPDATE submissions SET verification_retry_next_at = 0")
+    monkeypatch.setattr(verification, "retry_interval", lambda: 100)
+    assert asyncio.run(verification.retry(1, "02", "docente"))[1]["verification_retry_count"] == 2
+    assert next_at() >= now + 200
+    with closing(sqlite3.connect(grader_db)) as conn, conn:
+        conn.execute("UPDATE submissions SET received_at_utc = datetime('now', '-2 hours')")
+    assert asyncio.run(verification.retry(1, "02", "docente"))[0] == "agotado"
+    assert database.pending_verification_ids(5, 3600) == []
+    path = "/admin/submissions/1/reset-verification"
+    headers = {"Authorization": "Bearer admin-test-credential"}
+    assert client.post(path, headers=headers).json() == {"receipt_id": 1, "verification_retry_count": 0}
+    assert next_at() >= now + 200
+    assert asyncio.run(verification.retry(1, "02", "docente"))[0] == "programado"
+    assert "actor=superadmin acción=reset_verification recurso=1" in grader_db.with_name("grader.log").read_text()
+
+
+def test_retry_credential_failure_refunds_and_pauses(client, monkeypatch):
+    from src import verification
+
+    token = register(client, "Credencial", [MEMBER]).headers["X-Team-Token"]
+    submit(client, token, deliverable_id="D7", label="D7")
+    calls = []
+
+    async def invalid(*args):
+        calls.append(args)
+        github._credential_error(401)
+
+    monkeypatch.setattr(github, "verify_submission", invalid)
+    assert asyncio.run(verification.retry(1, "02", "docente"))[1]["verification_retry_count"] == 0
+    assert asyncio.run(verification.retry(1, "02", "docente")) == ("programado", (0, 0))
+    assert len(calls) == 1

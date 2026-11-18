@@ -198,12 +198,14 @@ async def submit_lab_results(
         try:
             verified_sha = await verify_submission(repository, label, commit_hash)
             ci = await verified_ci_status(repository, verified_sha)
-        except GitHubUnavailable:
+        except GitHubUnavailable as exc:
+            next_retry = exc.retry_at
             verified_sha, verification, ci = commit_hash, "pendiente", "desconocido"
         else:
+            next_retry = 0
             verification = "verificado"
         return await run_in_threadpool(
-            save_submission_db, team_id, deliverable_id, label, verified_sha, metrics_json, is_ci_passing, repository, verification, ci, received_at
+            save_submission_db, team_id, deliverable_id, label, verified_sha, metrics_json, is_ci_passing, repository, verification, ci, received_at, next_retry
         )
     except ValueError:
         raise

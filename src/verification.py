@@ -1,4 +1,5 @@
 import asyncio
+from time import time
 from contextlib import asynccontextmanager, suppress
 
 from starlette.concurrency import run_in_threadpool
@@ -16,24 +17,38 @@ def stale_minutes() -> int:
     return configured_limit("GITHUB_PENDING_ALERT_MINUTES", 15)
 
 
+def retry_window() -> int:
+    return 3600 * configured_limit("GITHUB_RETRY_WINDOW_HOURS", 48)
+
+
+def retry_interval() -> int:
+    return configured_limit("GITHUB_RETRY_INTERVAL_SECONDS", 60)
+
+
 async def retry(receipt_id: int, section: str | None, actor: str):
     limit = max_attempts()
-    outcome, claimed = await run_in_threadpool(database.claim_verification, receipt_id, section, limit)
-    if claimed is None:
-        return outcome, None
-    repository, label, sha, count = claimed
+    outcome, claimed = await run_in_threadpool(database.claim_verification, receipt_id, section, limit,
+                                               retry_window(), github.credential_alert_active())
+    if outcome != "tomado":
+        return outcome, claimed
+    repository, label, sha, count, lease = claimed
+    next_at = 0
     logger.info("Reintento de verificación iniciado actor=%s recibo=%d reintento=%d", actor, receipt_id, count)
     ci = "desconocido"
     try:
         verified_sha = await github.verify_submission(repository, label, sha)
         ci = await github.verified_ci_status(repository, verified_sha)
-    except github.GitHubUnavailable:
+    except github.GitHubCredentialError:
+        count -= 1
         status = "pendiente"
+    except github.GitHubUnavailable as exc:
+        status = "pendiente"
+        next_at = max(int(time()) + retry_interval() * 2 ** min(count - 1, 16), exc.retry_at)
     except github.GitHubVerificationError:
         status = "inconsistente"
     else:
         sha, status = verified_sha, "verificado"
-    updated = await run_in_threadpool(database.finish_verification, receipt_id, count, sha, status, ci)
+    updated = await run_in_threadpool(database.finish_verification, receipt_id, lease, count, sha, status, ci, next_at)
     if not updated:
         return "cambió", None
     logger.info("Verificación reintentada actor=%s recibo=%d reintento=%d estado=%s",
@@ -49,7 +64,10 @@ async def retry_batch():
     aged = await run_in_threadpool(database.aged_pending_count, threshold)
     if aged:
         logger.warning("Recibos pendientes de GitHub por más de %d minutos cantidad=%d", threshold, aged)
-    for receipt_id in await run_in_threadpool(database.pending_verification_ids, max_attempts()):
+    await github.recover_credential()
+    if github.credential_alert_active():
+        return
+    for receipt_id in await run_in_threadpool(database.pending_verification_ids, max_attempts(), retry_window()):
         await retry(receipt_id, None, "reintento_automático")
 
 
@@ -64,7 +82,8 @@ async def _loop(interval: int):
 
 @asynccontextmanager
 async def background_retries():
-    interval = configured_limit("GITHUB_RETRY_INTERVAL_SECONDS", 60)
+    interval = retry_interval()
+    retry_window()
     max_attempts()
     stale_minutes()
     task = asyncio.create_task(_loop(interval))

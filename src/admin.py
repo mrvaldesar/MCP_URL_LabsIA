@@ -196,9 +196,27 @@ async def retry_verification(request: Request):
         return JSONResponse({"error": "Recibo pendiente no encontrado."}, status_code=404)
     if outcome == "agotado":
         return JSONResponse({"error": "Se alcanzó el máximo de reintentos del recibo."}, status_code=409)
+    if outcome == "programado":
+        count, next_at = payload
+        return JSONResponse({"receipt_id": receipt_id, "verification_status": "pendiente",
+                             "verification_retry_count": count, "next_retry_at_epoch": next_at or None},
+                            status_code=202)
     if outcome in ("en_curso", "cambió"):
         return JSONResponse({"error": "El recibo cambió o ya se está verificando. Consulta el CSV."}, status_code=409)
     return JSONResponse(payload, status_code=202 if outcome == "pendiente" else 200)
+
+
+@admin_only
+async def reset_verification(request: Request):
+    receipt_id = request.path_params["id"]
+    if not 0 < receipt_id <= 2**63 - 1:
+        return JSONResponse({"error": "Recibo pendiente no encontrado."}, status_code=404)
+    outcome = await run_in_threadpool(database.reset_verification, receipt_id, request.state.admin_section)
+    if outcome == "ausente":
+        return JSONResponse({"error": "Recibo pendiente no encontrado."}, status_code=404)
+    if outcome == "en_curso":
+        return JSONResponse({"error": "El recibo ya se está verificando."}, status_code=409)
+    return JSONResponse({"receipt_id": receipt_id, "verification_retry_count": 0})
 
 
 class DeliveryWindow(BaseModel):
@@ -290,6 +308,7 @@ ROUTES = [
     Route("/admin/teams/{id:int}/assignment", change_assignment, methods=["PATCH"]),
     Route("/admin/windows", set_window, methods=["PUT"]),
     Route("/admin/github/health", github_health, methods=["GET"]),
+    Route("/admin/submissions/{id:int}/reset-verification", reset_verification, methods=["POST"]),
     Route("/admin/submissions/{id:int}/retry-verification", retry_verification, methods=["POST"]),
     Route("/admin/teams/{id:int}/update", update_team, methods=["POST"]),
     Route("/admin/teams/{id:int}/rotate-token", rotate_token, methods=["POST"]),

@@ -2,6 +2,8 @@ import asyncio
 import os
 import re
 from contextlib import asynccontextmanager
+from email.utils import parsedate_to_datetime
+from time import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -22,7 +24,9 @@ class GitHubVerificationError(ValueError):
 
 
 class GitHubUnavailable(GitHubVerificationError):
-    pass
+    def __init__(self, message="", *, retry_at=0):
+        super().__init__(message)
+        self.retry_at = retry_at
 
 
 class GitHubNotFound(GitHubVerificationError):
@@ -36,20 +40,23 @@ class GitHubCredentialError(GitHubUnavailable):
 APP_ENV = ("GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH")
 _token_lock = asyncio.Lock()
 _installation_token = None
+_credential_alert = None
 
 
 def _app_config():
     return tuple(os.getenv(key, "") for key in APP_ENV)
 
 
-def _credential_error(status):
+def _credential_error(status, path=None):
+    global _credential_alert
+    _credential_alert = (path, status)
     logger.warning("Credencial de GitHub inválida o con permisos insuficientes estado=%s", status)
     raise GitHubCredentialError("La credencial de GitHub requiere revisión del docente.")
 
 
 def _check_credential(response: httpx.Response):
     if response.status_code == 401:
-        _credential_error(401)
+        _credential_error(401, response.request.url.raw_path.decode())
     if response.status_code == 403:
         if response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers:
             return
@@ -59,7 +66,51 @@ def _check_credential(response: httpx.Response):
             payload = {}
         message = str(payload.get("message", "")).lower() if isinstance(payload, dict) else ""
         if "rate limit" not in message and "abuse detection" not in message:
-            _credential_error(403)
+            _credential_error(403, response.request.url.raw_path.decode())
+
+
+def retry_at(response: httpx.Response) -> int:
+    times = [0]
+    retry = response.headers.get("retry-after", "")
+    try:
+        times.append(int(time()) + int(retry))
+    except ValueError:
+        try:
+            times.append(int(parsedate_to_datetime(retry).timestamp()))
+        except (ValueError, OverflowError, TypeError):
+            pass
+    # GitHub sends the reset for successful quota usage too. Use it only
+    # when throttled or when the response asks for a retry.
+    if response.status_code in (403, 429) or retry:
+        reset = response.headers.get("x-ratelimit-reset", "")
+        if reset.isascii() and reset.isdecimal() and len(reset) <= 12:
+            times.append(int(reset))
+    return min(max(times), 253402300799)
+
+
+def credential_alert_active() -> bool:
+    return _credential_alert is not None
+
+
+async def recover_credential():
+    global _credential_alert
+    alert = _credential_alert
+    if alert is None:
+        return
+    path, _ = alert
+    try:
+        if path is None or path.startswith("/app/installations/"):
+            healthy = await credential_status() == "valida"
+        else:
+            async with _client() as client:
+                response = await _request(client, path)
+                _check_credential(response)
+                healthy = response.is_success
+    except GitHubUnavailable:
+        return
+    if healthy and _credential_alert is alert:
+        _credential_alert = None
+        logger.info("Se recuperó la credencial de GitHub")
 
 
 async def _app_token(client, config):
@@ -87,7 +138,7 @@ async def _app_token(client, config):
         if response.status_code == 404:
             _credential_error("instalación_app")
         if response.status_code != 201:
-            raise GitHubUnavailable("GitHub no pudo emitir el token de instalación. Intenta más tarde.")
+            raise GitHubUnavailable("GitHub no pudo emitir el token de instalación. Intenta más tarde.", retry_at=retry_at(response))
         try:
             payload = response.json()
             token = payload["token"]
@@ -147,7 +198,7 @@ async def _get(client: httpx.AsyncClient, path: str) -> dict:
             payload = None
         if isinstance(payload, dict):
             return payload
-    raise GitHubUnavailable("GitHub no pudo verificar la solicitud. Intenta más tarde o avisa al docente.")
+    raise GitHubUnavailable("GitHub no pudo verificar la solicitud. Intenta más tarde o avisa al docente.", retry_at=retry_at(response))
 
 
 async def validate_repository(repository: str, section: str, users=()) -> list[str]:
@@ -199,7 +250,7 @@ async def _check_contents_access(client, path):
     response = await _request(client, f"{path}/git/matching-refs/tags")
     _check_credential(response)
     if not response.is_success:
-        raise GitHubUnavailable("GitHub no permite confirmar el acceso al contenido. Avisa al docente.")
+        raise GitHubUnavailable("GitHub no permite confirmar el acceso al contenido. Avisa al docente.", retry_at=retry_at(response))
     try:
         refs = response.json()
     except ValueError:
