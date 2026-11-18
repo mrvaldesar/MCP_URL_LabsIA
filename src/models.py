@@ -1,6 +1,8 @@
+import os
+import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Section = Literal["01", "02"]
 Modality = Literal["individual", "pareja", "trio"]
@@ -18,4 +20,11 @@ class Member(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     github_user: Annotated[str, Field(max_length=39, pattern=GITHUB_USER_PATTERN)]
-    carnet: Annotated[str, Field(pattern=CARNET_PATTERN)]
+    carnet: Annotated[str, Field(max_length=64)]
+
+    @field_validator("carnet")
+    @classmethod
+    def validate_carnet(cls, value: str) -> str:
+        if not re.fullmatch(os.getenv("CARNET_PATTERN", CARNET_PATTERN), value):
+            raise ValueError("El carné no cumple el formato del curso. Revisa los caracteres y ceros iniciales.")
+        return value

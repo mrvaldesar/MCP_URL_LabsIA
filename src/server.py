@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sqlite3
 from contextlib import asynccontextmanager
@@ -20,7 +21,7 @@ from src.audit import AuditMiddleware, audit_log, logger
 from src.auth import TeamAuthMiddleware
 from src.database import Receipt, get_team_repository, init_db, register_team_db, save_submission_db
 from src.github import verify_submission
-from src.models import Member, Modality, Section, validate_team_size
+from src.models import CARNET_PATTERN, Member, Modality, Section, validate_team_size
 
 COMMIT_PATTERN = r"^[0-9a-f]{7,40}$"
 MAX_METRICS_BYTES = 64 * 1024
@@ -50,6 +51,9 @@ class GraderMCP(FastMCP):
             with audit_log():
                 try:
                     init_db()
+                    re.compile(os.getenv("CARNET_PATTERN", CARNET_PATTERN))
+                    if database.roster_is_empty():
+                        logger.warning("El padrón está vacío. Carga el padrón de cada sección antes de abrir el registro.")
                 except Exception:
                     logger.exception("No se pudo inicializar SQLite")
                     raise

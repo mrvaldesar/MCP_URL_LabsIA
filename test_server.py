@@ -21,6 +21,7 @@ def grader_db(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_PATH", path)
     monkeypatch.setenv("GRADER_LOG_PATH", str(tmp_path / "grader.log"))
     monkeypatch.setenv("ADMIN_TOKEN", "admin-test-credential")
+    monkeypatch.setenv("STRICT_ROSTER", "false")
     database.init_db()
     return path
 
@@ -502,14 +503,14 @@ def test_register_checks_roster_tuple_and_section(client, grader_db, monkeypatch
         register(client, "Sección incorrecta", [MEMBER]),
     ]
     for response in responses:
-        assert response.json()["result"]["isError"] is (strict == "true")
-        assert ("X-Team-Token" in response.headers) is (strict != "true")
+        assert response.json()["result"]["isError"] is (strict != "false")
+        assert ("X-Team-Token" in response.headers) is (strict == "false")
     with closing(sqlite3.connect(grader_db)) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM teams").fetchone() == ((0 if strict == "true" else 2),)
+        assert conn.execute("SELECT COUNT(*) FROM teams").fetchone() == ((2 if strict == "false" else 0),)
 
     log = grader_db.with_name("grader.log").read_text()
-    assert ('"level": "WARNING"' in log and "Registro fuera del padrón" in log) is (strict != "true")
-    if strict == "true":
+    assert ('"level": "WARNING"' in log and "Registro fuera del padrón" in log) is (strict == "false")
+    if strict != "false":
         assert "padrón de la sección" in responses[0].json()["result"]["content"][0]["text"]
         uppercase = MEMBER | {"github_user": MEMBER["github_user"].upper()}
         assert "X-Team-Token" in register(client, "Válido", [uppercase], section="01").headers
@@ -649,3 +650,11 @@ def test_concurrent_team_registration_and_submission(grader_db, github_api, monk
         assert all(row[3:] == ("D1", "D1", 1, "abc1234" + "0" * 33, "{}", 1) for row in rows)
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     assert len(github_api) == 40
+
+
+def test_empty_roster_startup_and_custom_carnet(client, grader_db, monkeypatch):
+    assert "El padrón está vacío" in grader_db.with_name("grader.log").read_text()
+    monkeypatch.setenv("CARNET_PATTERN", r"[A-Z][0-9]{8}")
+    assert "X-Team-Token" not in register(client, "Formato antiguo", [MEMBER]).headers
+    member = MEMBER | {"carnet": "A12345678"}
+    assert "X-Team-Token" in register(client, "Formato configurado", [member]).headers

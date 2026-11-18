@@ -132,16 +132,30 @@ def _claim_member_identities(conn: sqlite3.Connection, members: list[dict]):
         raise
 
 
+class RosterMismatch(ValueError):
+    def __init__(self, carnets):
+        super().__init__("Cada integrante debe figurar en el padrón de la sección con su usuario GitHub y carné. Verifica los datos o consulta al docente.")
+        self.carnets = carnets
+
+
+def strict_roster() -> bool:
+    return os.getenv("STRICT_ROSTER", "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def roster_is_empty() -> bool:
+    with _connect() as conn:
+        return conn.execute("SELECT 1 FROM roster LIMIT 1").fetchone() is None
+
+
 def _check_roster(conn: sqlite3.Connection, section: str, members: list[dict]) -> int:
-    unmatched = sum(
-        conn.execute("""
+    unmatched = [
+        member["carnet"] for member in members if conn.execute("""
             SELECT 1 FROM roster WHERE section = ? AND github_user = ? AND carnet = ?
         """, (section, member["github_user"], member["carnet"])).fetchone() is None
-        for member in members
-    )
-    if unmatched and os.getenv("STRICT_ROSTER", "").strip().lower() in {"1", "true", "yes", "on"}:
-        raise ValueError("Cada integrante debe figurar en el padrón de la sección con su usuario GitHub y carné.")
-    return unmatched
+    ]
+    if unmatched and strict_roster():
+        raise RosterMismatch(unmatched)
+    return len(unmatched)
 
 
 def register_team_db(team_name: str, section: str, modality: Modality, members: list[dict]) -> str:
