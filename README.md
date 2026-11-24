@@ -38,7 +38,7 @@ de actualizar el repositorio.
 
 ```powershell
 .\install-windows.cmd
-.\.venv\Scripts\python.exe -m src.server
+.\.venv\Scripts\python.exe -m tools.local_server start
 ```
 
 El instalador usa Python 3.10 o superior si ya está disponible. Si falta,
@@ -48,7 +48,7 @@ intenta instalar Python 3.12 para el usuario mediante WinGet.
 
 ```bash
 bash install-ubuntu.sh
-.venv/bin/python -m src.server
+.venv/bin/python -m tools.local_server start
 ```
 
 Si faltan los paquetes de Python y del entorno virtual, el instalador intenta
@@ -73,37 +73,25 @@ estas variables de entorno antes de iniciarlo:
 | `STRICT_ROSTER` | Opcional | `true` para exigir coincidencia con el padrón. Carga el padrón de cada sección antes de habilitarlo. |
 | `GRADER_LOG_PATH` | Opcional | Ruta del log. En local usa `grader.log` de forma predeterminada. |
 
-Para habilitar entregas y administración en una sesión local, ejecuta el bloque
-de tu sistema después de instalar las dependencias. Sustituye `organizacion-del-curso`
-y carga las credenciales desde tu gestor de secretos cuando se te soliciten.
-Puedes generar una credencial administrativa aleatoria con
-`python -c "import secrets; print(secrets.token_urlsafe(32))"` usando el
-ejecutable de Python del entorno virtual. Guárdala en tu gestor de secretos.
+El instalador abre un asistente interactivo. Puedes pulsar Enter en la primera
+pregunta para configurar después. El asistente puede generar el `ADMIN_TOKEN`
+o aceptar uno existente. Para GitHub, crea el token en tu cuenta con acceso
+a los repositorios asignados e introdúcelo cuando se solicite. Las credenciales
+que escribes se ocultan y el token docente generado se muestra una sola vez
+para que lo guardes en tu gestor de secretos.
 
-**Windows (PowerShell)**
+Para volver al asistente, usa el comando de tu sistema desde la raíz del repositorio:
 
-```powershell
-$env:GITHUB_COURSE_ORG = 'organizacion-del-curso'
-$env:GITHUB_API_TOKEN = [pscredential]::new('github', (Read-Host 'Token de GitHub' -AsSecureString)).GetNetworkCredential().Password
-$env:ADMIN_TOKEN = [pscredential]::new('admin', (Read-Host 'Token de administracion' -AsSecureString)).GetNetworkCredential().Password
-.\.venv\Scripts\python.exe -m src.server
-```
+| Sistema | Configurar |
+| --- | --- |
+| Windows (PowerShell) | `.\.venv\Scripts\python.exe -m tools.local_server configure` |
+| Ubuntu | `.venv/bin/python -m tools.local_server configure` |
 
-**Ubuntu (Bash)**
-
-```bash
-export GITHUB_COURSE_ORG='organizacion-del-curso'
-read -rsp 'Token de GitHub: ' GITHUB_API_TOKEN
-echo
-read -rsp 'Token de administracion: ' ADMIN_TOKEN
-echo
-export GITHUB_API_TOKEN ADMIN_TOKEN
-.venv/bin/python -m src.server
-```
-
-Los valores de estos ejemplos se cargan en la sesión actual. Para un despliegue,
-inyéctalos desde el gestor de secretos de la plataforma. El arranque local lee
-el entorno del proceso. Mantén las credenciales fuera del repositorio.
+La configuración local se guarda en texto plano en `.venv/grader-settings.json`.
+Usa el entorno virtual en una carpeta privada de tu usuario. El comando
+`tools.local_server start` carga el archivo y da prioridad a las variables de
+entorno ya definidas. Si eliminas `.venv`, vuelve a configurar el servidor.
+Para Docker o un despliegue en la nube, usa el gestor de secretos de la plataforma.
 
 Después del registro, [asigna un repositorio a cada equipo](#verificación-de-entregas-en-github)
 para habilitar sus entregas. Cada equipo usa el `X-Team-Token` que recibe al

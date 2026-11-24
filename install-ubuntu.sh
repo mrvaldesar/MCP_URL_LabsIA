@@ -20,4 +20,5 @@ if [[ ! -x .venv/bin/python ]]; then
     python3 -m venv .venv
 fi
 .venv/bin/python -m pip install -c requirements.txt mcp pydantic starlette uvicorn httpx
-echo 'Instalacion lista. Para iniciar el servidor: .venv/bin/python -m src.server'
+.venv/bin/python -m tools.local_server configure
+echo 'Instalacion lista. Para iniciar el servidor: .venv/bin/python -m tools.local_server start'

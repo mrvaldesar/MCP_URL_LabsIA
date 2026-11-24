@@ -34,7 +34,8 @@ if not exist "%INSTALLED_PYTHON%" goto missing_python
 
 :dependencies
 ".venv\Scripts\python.exe" -m pip install -c requirements.txt mcp pydantic starlette uvicorn httpx || exit /b 1
-echo Instalacion lista. Para iniciar el servidor: .venv\Scripts\python.exe -m src.server
+".venv\Scripts\python.exe" -m tools.local_server configure || exit /b 1
+echo Instalacion lista. Para iniciar el servidor: .venv\Scripts\python.exe -m tools.local_server start
 exit /b 0
 
 :missing_python
