@@ -26,16 +26,38 @@ docker run -d -p 8000:8000 -v "$(pwd)/data:/app/data" --name mcp_grader landivar
 
 La imagen ejecuta el servicio con UID y GID `10001`. Si el volumen montado ya contiene una base, ese usuario necesita acceso de lectura y escritura al directorio y a los archivos existentes de SQLite y del log.
 
-### Opción B. Entorno local
+### Opción B. Instaladores para Windows y Ubuntu
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # En Windows: .venv\Scripts\activate
-python -m pip install -r requirements.txt
-python -m src.server
+Descarga el repositorio completo y abre una terminal en la carpeta que contiene
+`requirements.txt`. Los instaladores crean un entorno virtual `.venv` e instalan
+las dependencias del servidor con las mismas versiones fijadas que usa Docker.
+Puedes volver a ejecutar el instalador para actualizar las dependencias después
+de actualizar el repositorio.
+
+**Windows (PowerShell)**
+
+```powershell
+.\install-windows.cmd
+.\.venv\Scripts\python.exe -m src.server
 ```
 
-El servidor estará escuchando en http://localhost:8000 (o el dominio configurado). El archivo de base de datos se creará automáticamente en `data/grader.db`.
+El instalador usa Python 3.10 o superior si ya está disponible. Si falta,
+intenta instalar Python 3.12 para el usuario mediante WinGet.
+
+**Ubuntu**
+
+```bash
+bash install-ubuntu.sh
+.venv/bin/python -m src.server
+```
+
+Si faltan los paquetes de Python y del entorno virtual, el instalador intenta
+instalarlos con `sudo apt-get`.
+
+Con el servidor en ejecución, abre <http://localhost:8000/health> para comprobar
+el estado. El endpoint MCP local es `http://localhost:8000/mcp` y la base de datos
+se crea automáticamente en `data/grader.db`. Para conectarte al servidor del
+curso como estudiante, sigue la sección «Uso para los estudiantes».
 
 ### Arranque en frío y suspensión
 
