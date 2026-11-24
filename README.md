@@ -59,6 +59,56 @@ el estado. El endpoint MCP local es `http://localhost:8000/mcp` y la base de dat
 se crea automáticamente en `data/grader.db`. Para conectarte al servidor del
 curso como estudiante, sigue la sección «Uso para los estudiantes».
 
+### Configuración local del servidor
+
+Con Python y las dependencias instaladas puedes arrancar el servidor, comprobar
+`/health` y registrar equipos. Para usar el servidor durante el curso, configura
+estas variables de entorno antes de iniciarlo:
+
+| Variable | Cuándo se necesita | Valor |
+| --- | --- | --- |
+| `GITHUB_COURSE_ORG` | Recepción de entregas | Nombre de la organización de GitHub del curso. |
+| `GITHUB_API_TOKEN` | Recepción de entregas | Token de GitHub del servidor con permiso de lectura de **Contents** en los repositorios asignados. |
+| `ADMIN_TOKEN` | Operación docente | Credencial independiente para exportar, gestionar padrones y administrar equipos. |
+| `STRICT_ROSTER` | Opcional | `true` para exigir coincidencia con el padrón. Carga el padrón de cada sección antes de habilitarlo. |
+| `GRADER_LOG_PATH` | Opcional | Ruta del log. En local usa `grader.log` de forma predeterminada. |
+
+Para habilitar entregas y administración en una sesión local, ejecuta el bloque
+de tu sistema después de instalar las dependencias. Sustituye `organizacion-del-curso`
+y carga las credenciales desde tu gestor de secretos cuando se te soliciten.
+Puedes generar una credencial administrativa aleatoria con
+`python -c "import secrets; print(secrets.token_urlsafe(32))"` usando el
+ejecutable de Python del entorno virtual. Guárdala en tu gestor de secretos.
+
+**Windows (PowerShell)**
+
+```powershell
+$env:GITHUB_COURSE_ORG = 'organizacion-del-curso'
+$env:GITHUB_API_TOKEN = [pscredential]::new('github', (Read-Host 'Token de GitHub' -AsSecureString)).GetNetworkCredential().Password
+$env:ADMIN_TOKEN = [pscredential]::new('admin', (Read-Host 'Token de administracion' -AsSecureString)).GetNetworkCredential().Password
+.\.venv\Scripts\python.exe -m src.server
+```
+
+**Ubuntu (Bash)**
+
+```bash
+export GITHUB_COURSE_ORG='organizacion-del-curso'
+read -rsp 'Token de GitHub: ' GITHUB_API_TOKEN
+echo
+read -rsp 'Token de administracion: ' ADMIN_TOKEN
+echo
+export GITHUB_API_TOKEN ADMIN_TOKEN
+.venv/bin/python -m src.server
+```
+
+Los valores de estos ejemplos se cargan en la sesión actual. Para un despliegue,
+inyéctalos desde el gestor de secretos de la plataforma. El arranque local lee
+el entorno del proceso. Mantén las credenciales fuera del repositorio.
+
+Después del registro, [asigna un repositorio a cada equipo](#verificación-de-entregas-en-github)
+para habilitar sus entregas. Cada equipo usa el `X-Team-Token` que recibe al
+registrarse para configurar su cliente MCP.
+
 ### Arranque en frío y suspensión
 
 La capa gratuita de Render suspende servicios inactivos. En Railway, el servicio puede dormir si está habilitada la suspensión por inactividad (Serverless). El arranque en frío puede provocar timeouts generalizados en los clientes MCP durante una entrega. Configura un monitor externo que haga ping a `GET /health` antes y durante la ventana de entrega, con un intervalo menor al tiempo de inactividad de la plataforma si el plan lo permite. Si el plan sigue suspendiendo el servicio, usa una opción sin suspensión durante esas ventanas. [Runbook de operación](docs/runbook.md)
