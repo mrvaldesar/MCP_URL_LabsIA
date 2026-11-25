@@ -104,11 +104,10 @@ sus migraciones, de la credencial docente y del acceso de lectura en GitHub.
 El aviso **MCP ONLINE** aparece cuando las tres comprobaciones pasan. Si alguna
 está pendiente o falla, el servidor sigue disponible para completar la configuración.
 
-La comprobación de GitHub usa el primer repositorio asignado por orden de ID de
-equipo. Si aún no hay equipos con repositorio asignado o quieres probar otro
-repositorio, agrega `--check-repo nombre-del-repositorio` al comando de arranque.
-Usa un repositorio de la organización configurada con al menos un commit.
-Por ejemplo, en Ubuntu:
+En el arranque normal, GitHub debe aceptar el token y devolver al menos un
+repositorio visible de la organización configurada. Esto verifica el token y la
+visibilidad de repositorios, incluidos los públicos. El permiso **Contents: Read** se comprueba en un
+repositorio específico con `--check-repo`. Usa uno que ya tenga un commit:
 
 ```bash
 .venv/bin/python -m tools.local_server start --check-repo laboratorio-prueba

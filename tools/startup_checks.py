@@ -21,10 +21,17 @@ async def check_github(repository: str | None) -> tuple[str, str]:
         return "PENDIENTE", "Configura GITHUB_COURSE_ORG y GITHUB_API_TOKEN."
     if not ORG_PATTERN.fullmatch(organization):
         return "ERROR", "GITHUB_COURSE_ORG debe ser el nombre de la organización."
-    if repository is None:
-        return "PENDIENTE", "Asigna un repositorio a un equipo o indica --check-repo NOMBRE."
-    if not REPO_PATTERN.fullmatch(repository) or repository in (".", ".."):
+    if repository is not None and (
+        not REPO_PATTERN.fullmatch(repository) or repository in (".", "..")
+    ):
         return "ERROR", "Indica solo el nombre del repositorio."
+
+    if repository is None:
+        path = f"/orgs/{organization}/repos"
+        target = organization
+    else:
+        path = f"/repos/{organization}/{repository}/commits"
+        target = f"{organization}/{repository}"
 
     try:
         async with httpx.AsyncClient(
@@ -33,24 +40,37 @@ async def check_github(repository: str | None) -> tuple[str, str]:
             timeout=5.0,
         ) as client:
             response = await asyncio.wait_for(
-                client.get(f"/repos/{organization}/{repository}/commits", params={"per_page": 1}),
+                client.get(path, params={"per_page": 1}),
                 timeout=6.0,
             )
     except (httpx.HTTPError, asyncio.TimeoutError, ValueError):
         return "ERROR", "No se pudo completar la consulta. Revisa la conexión y la credencial."
-    if response.status_code == 200:
-        return "OK", f"Lectura de Contents en {organization}/{repository}."
-    return "ERROR", (
-        f"GitHub devolvió HTTP {response.status_code} para {organization}/{repository}. "
-        "Revisa el token, los permisos y que el repositorio tenga al menos un commit."
-    )
+    if response.status_code != 200:
+        detail = (
+            "y que el repositorio tenga al menos un commit." if repository is not None
+            else "y la organización."
+        )
+        return "ERROR", (
+            f"GitHub devolvió HTTP {response.status_code} para {target}. "
+            f"Revisa el token, los permisos {detail}"
+        )
+    if repository is not None:
+        return "OK", f"Lectura de Contents en {target}."
+
+    try:
+        repositories = response.json()
+    except ValueError:
+        return "ERROR", "GitHub devolvió una lista de repositorios inválida."
+    if not isinstance(repositories, list):
+        return "ERROR", "GitHub devolvió una lista de repositorios inválida."
+    if not repositories:
+        return "PENDIENTE", f"GitHub no devolvió repositorios visibles en {organization}."
+    return "OK", f"Token aceptado y repositorios visibles en {organization}."
 
 
 async def report_startup(repository: str | None) -> None:
     try:
         db_ok = await run_in_threadpool(database.check_health)
-        if db_ok and repository is None:
-            repository = await run_in_threadpool(database.first_assigned_repository)
     except sqlite3.Error:
         db_ok = False
     db_result = ("OK", "SQLite y migraciones.") if db_ok else ("ERROR", "Revisa SQLite y las migraciones.")
