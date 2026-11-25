@@ -17,16 +17,9 @@ def configured_server(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("status_code", [200, 401])
-def test_report_checks_an_assigned_repository(
+def test_report_checks_an_explicit_repository(
     configured_server, monkeypatch, capsys, status_code
 ):
-    team_token = database.register_team_db(
-        "Equipo", "01", "individual", [{"github_user": "alumna", "carnet": "1234567"}]
-    )
-    team_id = database.resolve_team_id(team_token)
-    with database._connect() as conn:
-        conn.execute("UPDATE teams SET github_repository = 'lab' WHERE id = ?", (team_id,))
-
     def github(request):
         assert request.url.path == "/repos/course/lab/commits"
         assert request.url.params["per_page"] == "1"
@@ -38,7 +31,7 @@ def test_report_checks_an_assigned_repository(
         transport=httpx.MockTransport(github), **options
     ))
 
-    asyncio.run(startup_checks.report_startup(None))
+    asyncio.run(startup_checks.report_startup("lab"))
     output = capsys.readouterr().out
     assert "[OK] SQLite" in output and "[OK] Administración" in output
     assert ("ONLINE" in output) == (status_code == 200)
@@ -78,3 +71,33 @@ def test_github_deadline_reports_error_without_stopping_startup(
     assert "[ERROR] GitHub" in output
     assert "Servidor en ejecución" in output
     assert "ONLINE" not in output
+
+
+
+@pytest.mark.parametrize(
+    ("status_code", "payload", "expected"),
+    [
+        (200, [{"name": "lab"}], "[OK] GitHub"),
+        (200, [], "[PENDIENTE] GitHub"),
+        (200, {"message": "unexpected"}, "[ERROR] GitHub"),
+        (401, {"message": "Bad credentials"}, "[ERROR] GitHub"),
+    ],
+)
+def test_report_checks_organization_without_assigned_repositories(
+    configured_server, monkeypatch, capsys, status_code, payload, expected
+):
+    def github(request):
+        assert request.url.path == "/orgs/course/repos"
+        assert request.url.params["per_page"] == "1"
+        assert request.headers["authorization"] == "Bearer github-test-secret"
+        return httpx.Response(status_code, json=payload)
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **options: client_class(
+        transport=httpx.MockTransport(github), **options
+    ))
+    asyncio.run(startup_checks.report_startup(None))
+    output = capsys.readouterr().out
+    assert expected in output
+    assert ("ONLINE" in output) == (expected == "[OK] GitHub")
+    assert "github-test-secret" not in output
