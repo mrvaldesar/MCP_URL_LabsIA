@@ -97,6 +97,25 @@ Después del registro, [asigna un repositorio a cada equipo](#verificación-de-e
 para habilitar sus entregas. Cada equipo usa el `X-Team-Token` que recibe al
 registrarse para configurar su cliente MCP.
 
+### Validación al arrancar el servidor local
+
+Al ejecutar `tools.local_server start`, la consola muestra el estado de SQLite y
+sus migraciones, de la credencial docente y del acceso de lectura en GitHub.
+El aviso **MCP ONLINE** aparece cuando las tres comprobaciones pasan. Si alguna
+está pendiente o falla, el servidor sigue disponible para completar la configuración.
+
+La comprobación de GitHub usa el primer repositorio asignado por orden de ID de
+equipo. Si aún no hay equipos con repositorio asignado o quieres probar otro
+repositorio, agrega `--check-repo nombre-del-repositorio` al comando de arranque.
+Usa un repositorio de la organización configurada con al menos un commit.
+Por ejemplo, en Ubuntu:
+
+```bash
+.venv/bin/python -m tools.local_server start --check-repo laboratorio-prueba
+```
+
+`/health` sigue mostrando el estado de SQLite y las migraciones.
+
 ### Arranque en frío y suspensión
 
 La capa gratuita de Render suspende servicios inactivos. En Railway, el servicio puede dormir si está habilitada la suspensión por inactividad (Serverless). El arranque en frío puede provocar timeouts generalizados en los clientes MCP durante una entrega. Configura un monitor externo que haga ping a `GET /health` antes y durante la ventana de entrega, con un intervalo menor al tiempo de inactividad de la plataforma si el plan lo permite. Si el plan sigue suspendiendo el servicio, usa una opción sin suspensión durante esas ventanas. [Runbook de operación](docs/runbook.md)

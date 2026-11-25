@@ -5,7 +5,6 @@ from getpass import GetPassWarning, getpass
 import json
 import os
 from pathlib import Path
-import runpy
 import secrets
 import sys
 from tempfile import NamedTemporaryFile
@@ -113,6 +112,7 @@ def configure(settings: dict[str, str]) -> str | None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("configure", "start"))
+    parser.add_argument("--check-repo", help="Repositorio de GitHub para verificar al arrancar")
     args = parser.parse_args()
 
     if args.action == "configure" and not sys.stdin.isatty():
@@ -136,8 +136,9 @@ def main() -> int:
 
     for key, value in settings.items():
         os.environ.setdefault(key, value)
-    runpy.run_module("src.server", run_name="__main__")
-    return 0
+    from tools.startup_checks import serve
+
+    return serve(args.check_repo)
 
 
 if __name__ == "__main__":

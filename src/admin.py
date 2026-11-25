@@ -19,19 +19,20 @@ from src.models import Member, Modality, Section
 NO_STORE = {"Cache-Control": "no-store"}
 
 
+async def is_admin_token(token: str) -> bool:
+    expected = os.getenv("ADMIN_TOKEN")
+    if not expected or not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
+        return False
+    return not TOKEN_PATTERN.fullmatch(token) or (
+        await run_in_threadpool(database.resolve_team_id, token) is None
+    )
+
+
 def admin_only(endpoint):
     @wraps(endpoint)
     async def protected(request: Request):
-        expected = os.getenv("ADMIN_TOKEN")
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
-        valid = (
-            bool(expected)
-            and scheme.lower() == "bearer"
-            and hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
-        )
-        if valid and TOKEN_PATTERN.fullmatch(token):
-            valid = await run_in_threadpool(database.resolve_team_id, token) is None
-        if not valid:
+        if scheme.lower() != "bearer" or not await is_admin_token(token):
             return JSONResponse({"error": "Acceso administrativo denegado."}, status_code=403)
         return await endpoint(request)
     return protected
