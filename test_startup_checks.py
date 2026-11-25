@@ -54,3 +54,27 @@ def test_report_stays_available_without_secrets(configured_server, monkeypatch, 
     assert "[OK] SQLite" in output
     assert "[PENDIENTE] Administración" in output and "[PENDIENTE] GitHub" in output
     assert "ONLINE" not in output
+
+
+def test_github_deadline_reports_error_without_stopping_startup(
+    configured_server, monkeypatch, capsys
+):
+    async def github(request):
+        await asyncio.sleep(10)
+
+    async def short_deadline(awaitable, timeout):
+        assert timeout == 6.0
+        return await wait_for(awaitable, timeout=0.01)
+
+    wait_for = asyncio.wait_for
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(asyncio, "wait_for", short_deadline)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **options: client_class(
+        transport=httpx.MockTransport(github), **options
+    ))
+
+    asyncio.run(startup_checks.report_startup("lab"))
+    output = capsys.readouterr().out
+    assert "[ERROR] GitHub" in output
+    assert "Servidor en ejecución" in output
+    assert "ONLINE" not in output

@@ -36,7 +36,7 @@ async def check_github(repository: str | None) -> tuple[str, str]:
                 client.get(f"/repos/{organization}/{repository}/commits", params={"per_page": 1}),
                 timeout=6.0,
             )
-    except (httpx.HTTPError, TimeoutError, ValueError):
+    except (httpx.HTTPError, asyncio.TimeoutError, ValueError):
         return "ERROR", "No se pudo completar la consulta. Revisa la conexión y la credencial."
     if response.status_code == 200:
         return "OK", f"Lectura de Contents en {organization}/{repository}."
