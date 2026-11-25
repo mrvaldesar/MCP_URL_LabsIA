@@ -191,6 +191,14 @@ def get_team_repository(team_id: int) -> str | None:
         return team[0] if team else None
 
 
+def first_assigned_repository() -> str | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT github_repository FROM teams WHERE github_repository IS NOT NULL ORDER BY id LIMIT 1"
+        ).fetchone()
+    return row[0] if row else None
+
+
 def save_submission_db(
     team_id: int,
     deliverable_id: str,

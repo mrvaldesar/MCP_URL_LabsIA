@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from tools import local_server
+from tools import local_server, startup_checks
 
 
 @pytest.fixture
@@ -76,14 +76,14 @@ def test_start_loads_saved_settings_and_respects_environment(settings_path, monk
     monkeypatch.setenv("ADMIN_TOKEN", "from-environment")
     monkeypatch.setenv("STRICT_ROSTER", "placeholder")
     monkeypatch.delenv("STRICT_ROSTER")
-    monkeypatch.setattr(sys, "argv", ["local_server", "start"])
+    monkeypatch.setattr(sys, "argv", ["local_server", "start", "--check-repo", "example"])
     launches = []
-    monkeypatch.setattr(local_server.runpy, "run_module", lambda name, **kwargs: launches.append((name, kwargs)))
+    monkeypatch.setattr(startup_checks, "serve", lambda repo: launches.append(repo) or 0)
 
     assert local_server.main() == 0
     assert local_server.os.environ["ADMIN_TOKEN"] == "from-environment"
     assert local_server.os.environ["STRICT_ROSTER"] == "true"
-    assert launches == [("src.server", {"run_name": "__main__"})]
+    assert launches == ["example"]
 
 
 def test_invalid_settings_report_error_without_showing_contents(settings_path, monkeypatch, capsys):
