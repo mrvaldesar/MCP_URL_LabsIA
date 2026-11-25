@@ -26,16 +26,76 @@ docker run -d -p 8000:8000 -v "$(pwd)/data:/app/data" --name mcp_grader landivar
 
 La imagen ejecuta el servicio con UID y GID `10001`. Si el volumen montado ya contiene una base, ese usuario necesita acceso de lectura y escritura al directorio y a los archivos existentes de SQLite y del log.
 
-### Opción B. Entorno local
+### Opción B. Instaladores para Windows y Ubuntu
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # En Windows: .venv\Scripts\activate
-python -m pip install -r requirements.txt
-python -m src.server
+Descarga el repositorio completo y abre una terminal en la carpeta que contiene
+`requirements.txt`. Los instaladores crean un entorno virtual `.venv` e instalan
+las dependencias del servidor con las mismas versiones fijadas que usa Docker.
+Puedes volver a ejecutar el instalador para actualizar las dependencias después
+de actualizar el repositorio.
+
+**Windows (PowerShell)**
+
+```powershell
+.\install-windows.cmd
+.\.venv\Scripts\python.exe -m tools.local_server start
 ```
 
-El servidor estará escuchando en http://localhost:8000 (o el dominio configurado). El archivo de base de datos se creará automáticamente en `data/grader.db`.
+El instalador usa Python 3.10 o superior si ya está disponible. Si falta,
+intenta instalar Python 3.12 para el usuario mediante WinGet.
+
+**Ubuntu**
+
+```bash
+bash install-ubuntu.sh
+.venv/bin/python -m tools.local_server start
+```
+
+Si faltan los paquetes de Python y del entorno virtual, el instalador intenta
+instalarlos con `sudo apt-get`.
+
+Con el servidor en ejecución, abre <http://localhost:8000/health> para comprobar
+el estado. El endpoint MCP local es `http://localhost:8000/mcp` y la base de datos
+se crea automáticamente en `data/grader.db`. Para conectarte al servidor del
+curso como estudiante, sigue la sección «Uso para los estudiantes».
+
+### Configuración local del servidor
+
+Con Python y las dependencias instaladas puedes arrancar el servidor, comprobar
+`/health` y registrar equipos. Para usar el servidor durante el curso, configura
+estas variables de entorno antes de iniciarlo:
+
+| Variable | Cuándo se necesita | Valor |
+| --- | --- | --- |
+| `GITHUB_COURSE_ORG` | Recepción de entregas | Nombre de la organización de GitHub del curso. |
+| `GITHUB_API_TOKEN` | Recepción de entregas | Token de GitHub del servidor con permiso de lectura de **Contents** en los repositorios asignados. |
+| `ADMIN_TOKEN` | Operación docente | Credencial independiente para exportar, gestionar padrones y administrar equipos. |
+| `STRICT_ROSTER` | Opcional | `true` para exigir coincidencia con el padrón. Carga el padrón de cada sección antes de habilitarlo. |
+| `GRADER_LOG_PATH` | Opcional | Ruta del log. En local usa `grader.log` de forma predeterminada. |
+
+El instalador abre un asistente interactivo. Puedes pulsar Enter en la primera
+pregunta para configurar después. El asistente puede generar el `ADMIN_TOKEN`
+o aceptar uno existente. Para GitHub, crea el token en tu cuenta con acceso
+a los repositorios asignados e introdúcelo cuando se solicite. Las credenciales
+que escribes se ocultan y el token docente generado se muestra una sola vez
+para que lo guardes en tu gestor de secretos.
+
+Para volver al asistente, usa el comando de tu sistema desde la raíz del repositorio:
+
+| Sistema | Configurar |
+| --- | --- |
+| Windows (PowerShell) | `.\.venv\Scripts\python.exe -m tools.local_server configure` |
+| Ubuntu | `.venv/bin/python -m tools.local_server configure` |
+
+La configuración local se guarda en texto plano en `.venv/grader-settings.json`.
+Usa el entorno virtual en una carpeta privada de tu usuario. El comando
+`tools.local_server start` carga el archivo y da prioridad a las variables de
+entorno ya definidas. Si eliminas `.venv`, vuelve a configurar el servidor.
+Para Docker o un despliegue en la nube, usa el gestor de secretos de la plataforma.
+
+Después del registro, [asigna un repositorio a cada equipo](#verificación-de-entregas-en-github)
+para habilitar sus entregas. Cada equipo usa el `X-Team-Token` que recibe al
+registrarse para configurar su cliente MCP.
 
 ### Arranque en frío y suspensión
 
